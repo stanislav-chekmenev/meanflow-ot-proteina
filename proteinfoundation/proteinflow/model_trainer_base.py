@@ -46,6 +46,7 @@ class ModelTrainerBase(L.LightningModule):
         # Attributes re-written by classes that inherit from this one
         self.nn = None
         self.fm = None
+        self.ot_sampler = None  # Overridden by subclasses if OT coupling enabled
 
         # For autoguidance, overridden in `self.configure_inference`
         self.nn_ag = None
@@ -246,7 +247,12 @@ class ModelTrainerBase(L.LightningModule):
         x_0 = self.fm.sample_reference(
             n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
         )
-        
+
+        # Optimal transport coupling: re-pair noise with data
+        if self.ot_sampler is not None:
+            ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_0, x_1, mask)
+            x_0 = x_0[ot_noise_idx]
+
         if self.motif_conditioning:
             batch.update(self.motif_factory(batch))
             x_1 = batch["x_1"] # we need this since we change x_1 based n the motif center

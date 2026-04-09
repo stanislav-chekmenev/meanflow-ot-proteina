@@ -42,6 +42,12 @@ training:
   mask_A_prob: 0.5
   mask_C_prob: 0.5
   fold_label_sample_ratio: [0.5, 0.1, 0.15, 0.25]   # Training proportion for [None, C, CA, CAT]. If specified, will override mask_{C,A,T}_prob
+  ot_coupling:
+    enabled: True
+    method: exact
+    reg: 0.05
+    reg_m: 1.0
+    normalize_cost: False
 
 opt:
   lr: 0.0001

@@ -77,20 +77,16 @@ class TestOTPlanSampler:
         self, x0_2d: torch.Tensor, x1_2d: torch.Tensor
     ) -> None:
         """Rows and columns of the plan should each sum to 1/B."""
+        import numpy as np
+
         sampler = OTPlanSampler(method="exact")
         pi = sampler.get_map(x0_2d, x1_2d)
         expected_marginal = 1.0 / BATCH_SIZE
-        torch.testing.assert_close(
-            pi.sum(dim=1),
-            torch.full((BATCH_SIZE,), expected_marginal),
-            atol=1e-5,
-            rtol=1e-5,
+        np.testing.assert_allclose(
+            pi.sum(axis=1), np.full(BATCH_SIZE, expected_marginal), atol=1e-5
         )
-        torch.testing.assert_close(
-            pi.sum(dim=0),
-            torch.full((BATCH_SIZE,), expected_marginal),
-            atol=1e-5,
-            rtol=1e-5,
+        np.testing.assert_allclose(
+            pi.sum(axis=0), np.full(BATCH_SIZE, expected_marginal), atol=1e-5
         )
 
     def test_sample_plan_output_shapes(
@@ -111,13 +107,18 @@ class TestOTPlanSampler:
         assert x0_paired.shape == x0_3d.shape
         assert x1_paired.shape == x1_3d.shape
 
-    def test_sample_plan_with_scipy_preserves_x1_order(
+    def test_sample_plan_with_scipy_returns_permutation_indices(
         self, x0_3d: torch.Tensor, x1_3d: torch.Tensor
     ) -> None:
-        """sample_plan_with_scipy should return x1 unchanged."""
+        """sample_plan_with_scipy should return valid permutation indices."""
         sampler = OTPlanSampler(method="exact")
-        _, x1_out = sampler.sample_plan_with_scipy(x0_3d, x1_3d)
-        torch.testing.assert_close(x1_out, x1_3d)
+        j = sampler.sample_plan_with_scipy(x0_3d, x1_3d)
+        B = x0_3d.shape[0]
+        assert len(j) == B
+        assert set(j) == set(range(B)), "Indices should be a permutation of 0..B-1"
+        # Using the indices on original (non-flattened) tensor should preserve shape
+        x0_permuted = x0_3d[j]
+        assert x0_permuted.shape == x0_3d.shape
 
 
 # ===========================================================================
@@ -233,3 +234,65 @@ class TestMaskedOTPlanSampler:
         for i in range(B):
             diffs = (x0 - x0_out[i : i + 1]).abs().sum(dim=(1, 2))
             assert diffs.min().item() < 1e-6
+
+
+# ===========================================================================
+# TestMaskedOTPlanSampler.sample_plan_with_scipy
+# ===========================================================================
+
+
+class TestMaskedSamplePlanWithScipy:
+    """Tests for MaskedOTPlanSampler.sample_plan_with_scipy (index-based API)."""
+
+    def test_returns_valid_permutation_indices(
+        self,
+        x0_3d: torch.Tensor,
+        x1_3d: torch.Tensor,
+        full_mask: torch.Tensor,
+    ) -> None:
+        """Should return a permutation of 0..B-1."""
+        sampler = MaskedOTPlanSampler()
+        j = sampler.sample_plan_with_scipy(x0_3d, x1_3d, full_mask)
+        assert len(j) == BATCH_SIZE
+        assert set(j) == set(range(BATCH_SIZE))
+
+    def test_indices_match_sample_plan(
+        self,
+        x0_3d: torch.Tensor,
+        x1_3d: torch.Tensor,
+        full_mask: torch.Tensor,
+    ) -> None:
+        """Indexing x0 with returned indices should match sample_plan output."""
+        sampler = MaskedOTPlanSampler()
+        j = sampler.sample_plan_with_scipy(x0_3d, x1_3d, full_mask)
+        x0_via_idx = x0_3d[j]
+        x0_via_plan, _ = sampler.sample_plan(x0_3d, x1_3d, full_mask)
+        torch.testing.assert_close(x0_via_idx, x0_via_plan)
+
+    def test_indexing_preserves_shape(
+        self,
+        x0_3d: torch.Tensor,
+        x1_3d: torch.Tensor,
+        full_mask: torch.Tensor,
+    ) -> None:
+        """x0[j] should preserve original [B, N, 3] shape."""
+        sampler = MaskedOTPlanSampler()
+        j = sampler.sample_plan_with_scipy(x0_3d, x1_3d, full_mask)
+        assert x0_3d[j].shape == x0_3d.shape
+
+    def test_masking_affects_indices(self) -> None:
+        """Different masks should produce different index permutations."""
+        torch.manual_seed(123)
+        B, N = 8, 20
+        x0 = torch.randn(B, N, 3)
+        x1 = torch.randn(B, N, 3) + 10.0
+        sampler = MaskedOTPlanSampler()
+
+        mask_full = torch.ones(B, N, dtype=torch.bool)
+        j_full = sampler.sample_plan_with_scipy(x0, x1, mask_full)
+
+        mask_half = torch.zeros(B, N, dtype=torch.bool)
+        mask_half[:, : N // 2] = True
+        j_half = sampler.sample_plan_with_scipy(x0, x1, mask_half)
+
+        assert not (j_full == j_half).all()

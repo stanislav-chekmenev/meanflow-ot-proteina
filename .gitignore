@@ -9,6 +9,7 @@ lightning_logs
 .DS_Store
 
 .vscode/
+.venv
 .env
 .logs/
 wandb/

@@ -10,11 +10,11 @@
 
 
 import math
-from typing import Callable, List, Literal, Optional, Tuple
+from typing import Callable, List, Literal, Optional, Tuple, Dict
 
 import torch
 from jaxtyping import Bool, Float
-from torch import Dict, Tensor
+from torch import Tensor
 from tqdm import tqdm
 
 from proteinfoundation.utils.align_utils.align_utils import mean_w_mask

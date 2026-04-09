@@ -28,6 +28,9 @@ dependencies = [
     "cpdb-protein",
     "loralib",
     "biopython",
+    "pot",
+    "scipy",
+    "pytest",
 ]
 
 [tool.uv]

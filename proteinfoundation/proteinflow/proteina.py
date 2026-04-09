@@ -19,6 +19,7 @@ from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from scipy.spatial.transform import Rotation
 from torch import Tensor
 
+from proteinfoundation.flow_matching.ot_sampler import MaskedOTPlanSampler
 from proteinfoundation.flow_matching.r3n_fm import R3NFlowMatcher
 from proteinfoundation.nn.protein_transformer import ProteinTransformerAF3
 from proteinfoundation.proteinflow.model_trainer_base import ModelTrainerBase
@@ -63,6 +64,17 @@ class Proteina(ModelTrainerBase):
        
         self.motif_conditioning = cfg_exp.training.get("motif_conditioning", False)
         self.fm = R3NFlowMatcher(zero_com= not self.motif_conditioning, scale_ref=1.0)  # Work in nm
+
+        # Optimal transport coupling
+        ot_cfg = cfg_exp.training.get("ot_coupling", {})
+        if ot_cfg.get("enabled", False):
+            self.ot_sampler = MaskedOTPlanSampler(
+                method=ot_cfg.get("method", "exact"),
+                reg=ot_cfg.get("reg", 0.05),
+                reg_m=ot_cfg.get("reg_m", 1.0),
+                normalize_cost=ot_cfg.get("normalize_cost", False),
+            )
+
         if self.motif_conditioning:
             self.motif_conditioning_sequence_rep = cfg_exp.training.get("motif_conditioning_sequence_rep", False)
             if self.motif_conditioning_sequence_rep:
