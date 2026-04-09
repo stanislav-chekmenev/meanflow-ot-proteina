@@ -1,0 +1,49 @@
+[project]
+name = "proteinfoundation"
+version = "1.0.0"
+description = "proteina"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "biotite==1.6.0",
+    "torch==2.10.0",
+    "torch-geometric",
+    "torch-sparse",
+    "torch-scatter",
+    "torch-cluster",
+    "transformers==4.48.3",
+    "python-dotenv==1.0.1",
+    "einops==0.6",
+    "dm-tree==0.1.8",
+    "lightning==2.5.0",
+    "loguru==0.7.2",
+    "hydra-core==1.3.1",
+    "numpy==2.1.0",
+    "pandas==1.5.3",
+    "biopandas==0.5.1",
+    "wandb==0.17.0",
+    "wget==3.2",
+    "tqdm==4.66.4",
+    "ml-collections==0.1.1",
+    "jaxtyping",
+    "cpdb-protein",
+    "loralib",
+    "biopython",
+]
+
+[tool.uv]
+find-links = [
+    "https://download.pytorch.org/whl/cu130",
+    "https://data.pyg.org/whl/torch-2.10.0+cu130.html"
+]    
+
+[tool.uv.extra-build-dependencies]
+torch-cluster = ["torch"]
+torch-sparse = ["torch"]
+torch-scatter = ["torch"]
+
+[tool.setuptools.packages.find]
+include = ["proteinfoundation*", "openfold*", "graphein_utils*"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
