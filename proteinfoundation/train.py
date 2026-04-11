@@ -46,6 +46,7 @@ from proteinfoundation.utils.training_analysis_utils import (
     LogSetpTimeCallback,
     SkipNanGradCallback,
 )
+from proteinfoundation.callbacks.protein_eval import ProteinEvalCallback
 
 
 # Things that should only be done by a single process
@@ -230,6 +231,18 @@ if __name__ == "__main__":
     else:
         # CSV fallback so metrics are saved even without wandb
         csv_logger = CSVLogger(save_dir=root_run, name="csv_logs")
+
+    # Protein eval callback — generate and visualize proteins periodically
+    eval_cfg = cfg_exp.get("eval", None)
+    if eval_cfg is not None and eval_cfg.get("enabled", False) and wandb_logger is not None:
+        gt_path = eval_cfg.get("ground_truth_pdb", None)
+        callbacks.append(
+            ProteinEvalCallback(
+                eval_every_n_steps=eval_cfg.every_n_steps,
+                n_residues=eval_cfg.n_residues,
+                ground_truth_pdb_path=gt_path,
+            )
+        )
 
     log_info(f"Using EMA with decay {cfg_exp.ema.decay}")
     callbacks.append(EMA(**cfg_exp.ema))

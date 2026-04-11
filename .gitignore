@@ -7,8 +7,9 @@ lightning_logs
 .ipynb_checkpoints/
 
 .DS_Store
-.claude
+.claude/
 
+.pytest_cache/
 .vscode/
 .venv
 venv.tar.gz
