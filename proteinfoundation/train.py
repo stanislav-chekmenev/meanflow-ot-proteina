@@ -17,6 +17,7 @@ sys.path.append(root)  # Adds project's root directory
 import argparse
 import json
 import pickle
+import traceback
 from pathlib import Path
 
 import hydra
@@ -25,7 +26,8 @@ import loralib as lora
 import torch
 import wandb
 from dotenv import load_dotenv
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.callbacks import LearningRateMonitor
+from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from lightning.pytorch.utilities import rank_zero_only
 from loguru import logger
 from omegaconf import OmegaConf
@@ -61,7 +63,7 @@ def store_configs(path_configs):
 
 
 @rank_zero_only
-def log_configs(path_configs, wandb_logger):
+def log_configs(path_configs, wandb_logger, run_name):
     if wandb_logger is None:
         return
     artifact = wandb.Artifact(f"config_files_{run_name}", type="config")
@@ -202,12 +204,32 @@ if __name__ == "__main__":
     # create datamodule containing default train and val dataloader
     datamodule = hydra.utils.instantiate(cfg_data.datamodule)
 
-    # Set logger
+    # Set logger — DDP-safe: disable wandb on non-rank-0 to avoid deadlock under srun
     wandb_logger = None
+    csv_logger = None
+    local_rank = int(os.environ.get("SLURM_LOCALID", os.environ.get("LOCAL_RANK", 0)))
+    if local_rank != 0:
+        os.environ["WANDB_MODE"] = "disabled"
+
     if cfg_exp.log.log_wandb and not args.nolog:
-        wandb_logger = WandbLogger(project=cfg_exp.log.wandb_project, id=run_name)
+        wandb_entity = cfg_exp.log.get("wandb_entity", None)
+        wandb_run_name = cfg_exp.log.get("wandb_run_name", None)
+        # Generate a unique run ID so each restart creates a fresh WandB run
+        # instead of resuming the previous one.
+        wandb_run_id = wandb.util.generate_id()
+        wandb_logger = WandbLogger(
+            project=cfg_exp.log.wandb_project,
+            id=wandb_run_id,
+            entity=wandb_entity,
+            name=wandb_run_name or run_name,
+            config=OmegaConf.to_container(cfg_exp, resolve=True),
+        )
         callbacks.append(LogEpochTimeCallback())
         callbacks.append(LogSetpTimeCallback())
+        callbacks.append(LearningRateMonitor(logging_interval="step"))
+    else:
+        # CSV fallback so metrics are saved even without wandb
+        csv_logger = CSVLogger(save_dir=root_run, name="csv_logs")
 
     log_info(f"Using EMA with decay {cfg_exp.ema.decay}")
     callbacks.append(EMA(**cfg_exp.ema))
@@ -227,7 +249,7 @@ if __name__ == "__main__":
             "save_weights_only": False,
             "filename": "chk_{epoch:08d}_{step:012d}",
             "every_n_train_steps": cfg_exp.log.checkpoint_every_n_steps,
-            "monitor": "train/trans_loss",
+            "monitor": "train/loss",
             "save_top_k": 10000,
             "mode": "min",
         }
@@ -250,7 +272,7 @@ if __name__ == "__main__":
             ),
         ]
         store_configs(path_configs)
-        log_configs(path_configs, wandb_logger)
+        log_configs(path_configs, wandb_logger, run_name)
 
     # Gradient and weight stats thoughout training, possibly skip updates with nan in grad
     if cfg_exp.opt.grad_and_weight_analysis:
@@ -278,13 +300,14 @@ if __name__ == "__main__":
     # Train
     plugins = []
     show_prog_bar = args.show_prog_bar
+    active_logger = wandb_logger if wandb_logger is not None else csv_logger
     trainer = L.Trainer(
         max_epochs=cfg_exp.opt.max_epochs,
         accelerator=cfg_exp.hardware.accelerator,
         devices=cfg_exp.hardware.ngpus_per_node_,  # This is number of gpus per node, not total
         num_nodes=cfg_exp.hardware.nnodes_,
         callbacks=callbacks,
-        logger=wandb_logger,
+        logger=active_logger,
         log_every_n_steps=cfg_exp.opt.log_every_n_steps,
         default_root_dir=root_run,
         check_val_every_n_epoch=None,  # Leave like this
@@ -298,6 +321,25 @@ if __name__ == "__main__":
         gradient_clip_algorithm="norm",
         gradient_clip_val=1.0,
     )
-    trainer.fit(
-        model, datamodule, ckpt_path=last_ckpt_path
-    )  # If None then it starts from scratch
+    try:
+        trainer.fit(
+            model, datamodule, ckpt_path=last_ckpt_path
+        )  # If None then it starts from scratch
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Training failed:\n{tb}")
+        if wandb.run is not None:
+            try:
+                wandb.run.alert(
+                    title="Training crashed",
+                    text=str(e),
+                    level=wandb.AlertLevel.ERROR,
+                )
+                wandb.finish(exit_code=1)
+            except Exception:
+                pass
+        sys.exit(1)
+
+    # Ensure wandb run finalizes properly on clean exit
+    if wandb.run is not None:
+        wandb.finish()

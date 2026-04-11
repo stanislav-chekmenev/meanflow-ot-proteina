@@ -428,6 +428,9 @@ class ModelTrainerBase(L.LightningModule):
             nres_mf = mask_mf.sum(dim=-1) * 3
             loss_per_sample[mf_idx] = (error_mf ** 2).sum(dim=(-1, -2)) / nres_mf
 
+        # Log raw loss before adaptive weighting
+        raw_loss = loss_per_sample.mean()
+
         # Adaptive weighting (paper Eq. 22)
         norm_p = self.meanflow_norm_p
         norm_eps = self.meanflow_norm_eps
@@ -450,7 +453,7 @@ class ModelTrainerBase(L.LightningModule):
         if not val_step:
             self.log(
                 f"train_loss",
-                train_loss,
+                raw_loss,
                 on_step=True,
                 on_epoch=True,
                 prog_bar=True,

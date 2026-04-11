@@ -31,15 +31,23 @@ ENV_TARBALL="$PROJECT_ROOT/venv.tar.gz"
 ENV_LOCAL="$DATA_ROOT/venvs/$PROJECT_NAME/.venv"    
 
 echo "Setting up virtual environment on node-local scratch..."
-if [ ! -d "$ENV_LOCAL/bin" ]; then
+# Version check: re-extract only when tarball has changed (compare mtime stamp)
+STAMP_FILE="$DATA_ROOT/venvs/$PROJECT_NAME/.tarball_mtime"
+TARBALL_MTIME="$(stat -c %Y "$ENV_TARBALL")"
+LOCAL_STAMP="$(cat "$STAMP_FILE" 2>/dev/null || echo "")"
+
+if [ "$TARBALL_MTIME" != "$LOCAL_STAMP" ]; then
+    echo "$(hostname): venv outdated or missing (tarball mtime=$TARBALL_MTIME, local=$LOCAL_STAMP) — re-extracting..."
+    rm -rf "$DATA_ROOT/venvs/$PROJECT_NAME"
     mkdir -p "$DATA_ROOT/venvs/$PROJECT_NAME"
     if ! tar xzf "$ENV_TARBALL" -C "$DATA_ROOT/venvs/$PROJECT_NAME"; then
         echo "ERROR: Failed to unpack $ENV_TARBALL" >&2
         exit 1
     fi
+    echo "$TARBALL_MTIME" > "$STAMP_FILE"
     echo "$(hostname): env unpacked to $ENV_LOCAL"
 else
-    echo "$(hostname): env already at $ENV_LOCAL"
+    echo "$(hostname): env up-to-date at $ENV_LOCAL"
 fi
 export VIRTUAL_ENV="$ENV_LOCAL"
 export PATH="$ENV_LOCAL/bin:$PATH"
@@ -78,7 +86,6 @@ export NCCL_SHM_DISABLE=0
 echo "Starting MeanFlow debug training..."
 srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
     --config_name training_ca_debug \
-    --nolog \
     --single \
     --show_prog_bar
 

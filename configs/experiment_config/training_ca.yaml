@@ -70,6 +70,8 @@ opt:
 
 log:
   wandb_project: protein_transformer_big_runs  # Leave this so we can compare runs easily
+  wandb_entity: null  # W&B team/entity (null = personal account)
+  wandb_run_name: null  # Display name override (null = use run_name_)
   log_wandb: True  # whether to log to wandb
   checkpoint: True  # whether to store checkpoints
   checkpoint_every_n_steps: 10000  # How often we store a checkpoint, should be greater than val_check_interval above

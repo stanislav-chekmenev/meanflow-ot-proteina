@@ -58,23 +58,25 @@ training:
 
 opt:
   lr: 0.0001
-  max_epochs: 500            # Short debug run
+  max_epochs: 3000            # Short debug run
   log_every_n_steps: 1
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 20
   val_check_interval: 999999  # Effectively disable validation (empty val set)
   skip_nan_grad: False
   grad_and_weight_analysis: False
   dist_strategy: ddp
 
 log:
-  wandb_project: protein_transformer_big_runs
-  log_wandb: False     # No wandb for debug
+  wandb_project: meanflow-ot-proteina
+  wandb_entity: null
+  wandb_run_name: null
+  log_wandb: True
   checkpoint: False    # No checkpoints for debug
 
 seed: 42
 
 ema:
-  decay: 0.0            # Disable EMA for debug speed
+  decay: 0.999
   validate_original_weights: False
   every_n_steps: 1
   cpu_offload: False
