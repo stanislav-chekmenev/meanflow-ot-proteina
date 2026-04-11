@@ -19,7 +19,7 @@ strict_feats: False  # if False, then fills missing features with default values
 #   "x_sc"
 #   "fold_emb"
 feats_init_seq: ["res_seq_pdb_idx", "chain_break_per_res", "x_sc"]  # Sequence features to include in initial representation
-feats_cond_seq: ["time_emb", "fold_emb"]  # Sequence features to include in conditioning variables
+feats_cond_seq: ["time_emb", "delta_t_emb", "fold_emb"]  # Sequence features to include in conditioning variables
 
 
 # Parameters for the features we extract (both for sequence representatoin and conditioning vector)
@@ -37,7 +37,7 @@ multilabel_mode: "sample"
 #   "rel_seq_sep"
 #   "time_emb"
 feats_pair_repr: ["rel_seq_sep", "x_sc_pair_dists", "xt_pair_dists"]  # Features to include in the pair representation
-feats_pair_cond: ["time_emb"]  # Features to include in the pair representation conditioning
+feats_pair_cond: ["time_emb", "delta_t_emb"]  # Features to include in the pair representation conditioning
 
 
 # Parameters for the pair features we extract

@@ -15,14 +15,14 @@ import re
 
 from abc import abstractmethod
 from functools import partial
-from typing import List, Literal
+from typing import Dict, List, Literal
 
 import lightning as L
 import numpy as np
 import torch
 from jaxtyping import Bool, Float
 from loguru import logger
-from torch import Dict, Tensor
+from torch import Tensor
 
 from proteinfoundation.utils.ff_utils.pdb_utils import mask_cath_code_by_level
 
@@ -59,7 +59,7 @@ class ModelTrainerBase(L.LightningModule):
         return optimizer
 
     def _nn_out_to_x_clean(self, nn_out, batch):
-        """
+        """[LEGACY - not used in MeanFlow training/inference]
         Transforms the output of the nn to a clean sample prediction. The transformation depends on the
         parameterization used. For now we admit x_1 or v.
 
@@ -90,7 +90,7 @@ class ModelTrainerBase(L.LightningModule):
         self,
         batch: Dict,
     ):
-        """
+        """[LEGACY - not used in MeanFlow training/inference]
         Predicts clean samples given noisy ones and time.
 
         Args:
@@ -117,7 +117,7 @@ class ModelTrainerBase(L.LightningModule):
         guidance_weight: float = 1.0,
         autoguidance_ratio: float = 0.0,
     ):
-        """
+        """[LEGACY - not used in MeanFlow training/inference]
         Logic for CFG and autoguidance goes here. This computes a clean sample prediction (can be single thing, tuple, etc)
         and the corresponding vector field used to initialize.
 
@@ -224,7 +224,10 @@ class ModelTrainerBase(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         """
-        Computes training loss for batch of samples.
+        MeanFlow training step. Learns average velocity u(z_t, r, t) using JVP.
+
+        PAPER CONVENTION: z_t = (1-t)*data + t*noise. Data at t=0, noise at t=1.
+        Proteina convention: x_0=noise, x_1=data. We map between them explicitly.
 
         Args:
             batch: Data batch.
@@ -232,43 +235,54 @@ class ModelTrainerBase(L.LightningModule):
         Returns:
             Training loss averaged over batches.
         """
-        val_step = batch_idx == -1  # validation step is indicated with batch_idx -1
+        val_step = batch_idx == -1
         log_prefix = "validation_loss" if val_step else "train"
-        
-        # Extract inputs from batch (our dataloader)
-        # This may apply augmentations, if requested in the config file
+
+        assert not self.motif_conditioning, (
+            "Motif conditioning is not yet supported with MeanFlow training. "
+            "Set training.motif_conditioning=False in your config."
+        )
+
+        # Extract inputs from batch
         x_1, mask, batch_shape, n, dtype = self.extract_clean_sample(batch)
 
-        # Center and mask input
+        # Center and mask data
         x_1 = self.fm._mask_and_zero_com(x_1, mask)
 
-        # Sample time, reference and align reference to target
-        t = self.sample_t(batch_shape)
+        # Sample (t, r) -- PAPER CONVENTION: t is noise-side, r is data-side, t >= r
+        t, r = self.fm.sample_two_timesteps(
+            batch_shape, self.device,
+            ratio=self.meanflow_ratio,
+            P_mean_t=self.meanflow_P_mean_t,
+            P_std_t=self.meanflow_P_std_t,
+            P_mean_r=self.meanflow_P_mean_r,
+            P_std_r=self.meanflow_P_std_r,
+        )
+
+        # Sample noise (x_0 in Proteina convention = noise)
         x_0 = self.fm.sample_reference(
             n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
         )
 
-        # Optimal transport coupling: re-pair noise with data
+        # OT coupling: re-pair noise with data
         if self.ot_sampler is not None:
             ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_0, x_1, mask)
             x_0 = x_0[ot_noise_idx]
 
-        if self.motif_conditioning:
-            batch.update(self.motif_factory(batch))
-            x_1 = batch["x_1"] # we need this since we change x_1 based n the motif center
-        # Interpolation
-        x_t = self.fm.interpolate(x_0, x_1, t)
-        # Add a few things to batch, needed for nn
-        batch["t"] = t
-        batch["mask"] = mask
-        batch["x_t"] = x_t
+        # --- PAPER CONVENTION: z_t = (1-t)*data + t*noise ---
+        # x_0 = noise, x_1 = data (Proteina naming)
+        t_ext = t[..., None, None]   # [B, 1, 1]
+        r_ext = r[..., None, None]   # [B, 1, 1]
+        z = (1 - t_ext) * x_1 + t_ext * x_0   # (1-t)*data + t*noise
+        v = x_0 - x_1                           # noise - data (conditional velocity)
+        z = self.fm._apply_mask(z, mask)
+        v = self.fm._apply_mask(v, mask)
 
         # Fold conditional training
         if self.cfg_exp.training.fold_cond:
             bs = x_1.shape[0]
             cath_code_list = batch.cath_code
             for i in range(bs):
-                # Progressively mask T, A, C levels
                 cath_code_list[i] = mask_cath_code_by_level(
                     cath_code_list[i], level="H"
                 )
@@ -289,24 +303,137 @@ class ModelTrainerBase(L.LightningModule):
             if "cath_code" in batch:
                 batch.pop("cath_code")
 
-        # Prediction for self-conditioning
-        if random.random() > 0.5 and self.cfg_exp.training.self_cond:
-            x_pred_sc, _ = self.predict_clean(batch)
-            batch["x_sc"] = self.detach_gradients(x_pred_sc)
+        # Split batch: JVP only needed when r < t (MeanFlow samples)
+        mf_mask_1d = (t - r).abs() > 1e-7  # [B], True = MeanFlow, False = standard FM
+        n_mf = mf_mask_1d.sum().item()
+        B = t.shape[0]
 
-        x_1_pred, nn_out = self.predict_clean(batch)
+        if n_mf == 0:
+            # All samples are standard FM — skip JVP entirely
+            batch_nn = {
+                "x_t": z,
+                "t": t,
+                "h": torch.zeros_like(t),
+                "mask": mask,
+            }
+            if "cath_code" in batch:
+                batch_nn["cath_code"] = batch["cath_code"]
+            u_pred = self.nn(batch_nn)["coors_pred"]
+            u_tgt = v.detach()
 
-        # Compute losses
-        fm_loss = self.compute_fm_loss(
-            x_1, x_1_pred, x_t, t, mask, log_prefix=log_prefix
-        )  # [*]
-        train_loss = torch.mean(fm_loss)
-        
-        if self.cfg_exp.loss.use_aux_loss:
-            auxiliary_loss = self.compute_auxiliary_loss(
-                x_1, x_1_pred, x_t, t, mask, nn_out=nn_out, log_prefix=log_prefix, batch=batch
-            )  # [*] already includes loss weights
-            train_loss = train_loss + torch.mean(auxiliary_loss)
+            u_pred = self.fm._mask_and_zero_com(u_pred, mask)
+            u_tgt = self.fm._mask_and_zero_com(u_tgt, mask)
+
+            error = (u_pred - u_tgt) * mask[..., None]
+            nres = mask.sum(dim=-1) * 3
+            loss_per_sample = (error ** 2).sum(dim=(-1, -2)) / nres
+
+        elif n_mf == B:
+            # All samples are MeanFlow — JVP on full batch
+            def u_func(z_in, t_in, r_in):
+                h = (t_in - r_in).squeeze(-1).squeeze(-1)
+                t_flat = t_in.squeeze(-1).squeeze(-1)
+                batch_nn = {
+                    "x_t": z_in,
+                    "t": t_flat,
+                    "h": h,
+                    "mask": mask,
+                }
+                if "cath_code" in batch:
+                    batch_nn["cath_code"] = batch["cath_code"]
+                nn_out = self.nn(batch_nn)
+                return nn_out["coors_pred"]
+
+            dtdt = torch.ones_like(t_ext)
+            drdt = torch.zeros_like(r_ext)
+
+            with torch.amp.autocast(self.device.type, enabled=False):
+                u_pred, dudt = torch.func.jvp(u_func, (z, t_ext, r_ext), (v, dtdt, drdt))
+
+            u_tgt = (v - (t_ext - r_ext) * dudt).detach()
+
+            u_pred = self.fm._mask_and_zero_com(u_pred, mask)
+            u_tgt = self.fm._mask_and_zero_com(u_tgt, mask)
+
+            error = (u_pred - u_tgt) * mask[..., None]
+            nres = mask.sum(dim=-1) * 3
+            loss_per_sample = (error ** 2).sum(dim=(-1, -2)) / nres
+
+        else:
+            # Mixed batch: split FM and MeanFlow subsets
+            fm_idx = torch.where(~mf_mask_1d)[0]
+            mf_idx = torch.where(mf_mask_1d)[0]
+
+            loss_per_sample = torch.zeros(B, device=self.device, dtype=z.dtype)
+
+            # -- FM subset: plain forward, no JVP --
+            z_fm = z[fm_idx]
+            v_fm = v[fm_idx]
+            t_fm = t[fm_idx]
+            mask_fm = mask[fm_idx]
+
+            batch_nn_fm = {
+                "x_t": z_fm,
+                "t": t_fm,
+                "h": torch.zeros_like(t_fm),
+                "mask": mask_fm,
+            }
+            if "cath_code" in batch:
+                batch_nn_fm["cath_code"] = [batch["cath_code"][i] for i in fm_idx.tolist()]
+            u_pred_fm = self.nn(batch_nn_fm)["coors_pred"]
+            u_tgt_fm = v_fm.detach()
+
+            u_pred_fm = self.fm._mask_and_zero_com(u_pred_fm, mask_fm)
+            u_tgt_fm = self.fm._mask_and_zero_com(u_tgt_fm, mask_fm)
+
+            error_fm = (u_pred_fm - u_tgt_fm) * mask_fm[..., None]
+            nres_fm = mask_fm.sum(dim=-1) * 3
+            loss_per_sample[fm_idx] = (error_fm ** 2).sum(dim=(-1, -2)) / nres_fm
+
+            # -- MeanFlow subset: JVP --
+            z_mf = z[mf_idx]
+            v_mf = v[mf_idx]
+            t_ext_mf = t_ext[mf_idx]
+            r_ext_mf = r_ext[mf_idx]
+            mask_mf = mask[mf_idx]
+
+            def u_func_mf(z_in, t_in, r_in):
+                h = (t_in - r_in).squeeze(-1).squeeze(-1)
+                t_flat = t_in.squeeze(-1).squeeze(-1)
+                batch_nn = {
+                    "x_t": z_in,
+                    "t": t_flat,
+                    "h": h,
+                    "mask": mask_mf,
+                }
+                if "cath_code" in batch:
+                    batch_nn["cath_code"] = [batch["cath_code"][i] for i in mf_idx.tolist()]
+                nn_out = self.nn(batch_nn)
+                return nn_out["coors_pred"]
+
+            dtdt_mf = torch.ones_like(t_ext_mf)
+            drdt_mf = torch.zeros_like(r_ext_mf)
+
+            with torch.amp.autocast(self.device.type, enabled=False):
+                u_pred_mf, dudt_mf = torch.func.jvp(
+                    u_func_mf, (z_mf, t_ext_mf, r_ext_mf), (v_mf, dtdt_mf, drdt_mf)
+                )
+
+            u_tgt_mf = (v_mf - (t_ext_mf - r_ext_mf) * dudt_mf).detach()
+
+            u_pred_mf = self.fm._mask_and_zero_com(u_pred_mf, mask_mf)
+            u_tgt_mf = self.fm._mask_and_zero_com(u_tgt_mf, mask_mf)
+
+            error_mf = (u_pred_mf - u_tgt_mf) * mask_mf[..., None]
+            nres_mf = mask_mf.sum(dim=-1) * 3
+            loss_per_sample[mf_idx] = (error_mf ** 2).sum(dim=(-1, -2)) / nres_mf
+
+        # Adaptive weighting (paper Eq. 22)
+        norm_p = self.meanflow_norm_p
+        norm_eps = self.meanflow_norm_eps
+        adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
+        loss_per_sample = loss_per_sample / adp_wt
+        train_loss = loss_per_sample.mean()
 
         self.log(
             f"{log_prefix}/loss",
@@ -320,7 +447,6 @@ class ModelTrainerBase(L.LightningModule):
             add_dataloader_idx=False,
         )
 
-        # Don't log if validation step (indicated by batch_id)
         if not val_step:
             self.log(
                 f"train_loss",
@@ -334,24 +460,7 @@ class ModelTrainerBase(L.LightningModule):
                 add_dataloader_idx=False,
             )
 
-            # For scaling laws
             b, n = mask.shape
-            nflops_step = None
-            if nflops_step is not None:
-                self.nflops = (
-                    self.nflops + nflops_step * self.trainer.world_size
-                )  # Times number of processes so it logs sum across devices
-                self.log(
-                    "scaling/nflops",
-                    self.nflops * 1.0,
-                    on_step=True,
-                    on_epoch=False,
-                    prog_bar=False,
-                    logger=True,
-                    batch_size=1,
-                    sync_dist=True,
-                )
-
             self.nsamples_processed = (
                 self.nsamples_processed + b * self.trainer.world_size
             )
@@ -365,7 +474,6 @@ class ModelTrainerBase(L.LightningModule):
                 batch_size=1,
                 sync_dist=True,
             )
-
             self.log(
                 "scaling/nparams",
                 self.nparams * 1.0,
@@ -376,13 +484,11 @@ class ModelTrainerBase(L.LightningModule):
                 batch_size=1,
                 sync_dist=True,
             )
-            # Constant line but ok, easy to compare # params
 
         return train_loss
 
-    @abstractmethod
     def compute_fm_loss(
-        self, x_1, x_1_pred, x_t, t: Float[Tensor, "*"], mask: Bool[Tensor, "* nres"]
+        self, x_1, x_1_pred, x_t, t: Float[Tensor, "*"], mask: Bool[Tensor, "* nres"], **kwargs
     ):
         """
         Computes and logs flow matching loss(es).
@@ -397,10 +503,10 @@ class ModelTrainerBase(L.LightningModule):
         Returns:
             Flow matching loss per sample in the batch.
         """
+        raise NotImplementedError("Subclass must override compute_fm_loss if used")
 
-    @abstractmethod
     def compute_auxiliary_loss(
-        self, x_1, x_1_pred, x_t, t: Float[Tensor, "*"], mask: Bool[Tensor, "* nres"], batch = None
+        self, x_1, x_1_pred, x_t, t: Float[Tensor, "*"], mask: Bool[Tensor, "* nres"], batch = None, **kwargs
     ):
         """
         Computes and logs auxiliary losses.
@@ -415,10 +521,11 @@ class ModelTrainerBase(L.LightningModule):
         Returns:
             Auxiliary loss per sample in the batch.
         """
+        raise NotImplementedError("Subclass must override compute_auxiliary_loss if used")
 
-    @abstractmethod
     def detach_gradients(self, x):
         """Detaches gradients from sample x"""
+        raise NotImplementedError("Subclass must override detach_gradients if used")
 
     def validation_step(self, batch, batch_idx):
         """
@@ -464,54 +571,32 @@ class ModelTrainerBase(L.LightningModule):
 
     def predict_step(self, batch, batch_idx):
         """
-        Makes predictions. Should call set_inf_cfg before calling this.
+        MeanFlow prediction step. Uses average velocity field for generation.
 
         Args:
-            batch: data batch, contains no data, but the info of the samples
-                to generate (nsamples, nres, dt)
+            batch: data batch with nsamples, nres, and optionally mask.
 
         Returns:
             Samples generated in atom 37 format.
         """
-        sampling_args = self.inf_cfg.sampling_caflow
-
-        cath_code = (
-            _extract_cath_code(batch) if self.inf_cfg.get("fold_cond", False) else None
-        )  # When using unconditional model, don't use cath_code
-        guidance_weight = self.inf_cfg.get("guidance_weight", 1.0)
-        autoguidance_ratio = self.inf_cfg.get("autoguidance_ratio", 0.0)
-        
-        mask = batch['mask'].squeeze(0) if 'mask' in batch else None
-        if 'motif_seq_mask' in batch:
-            fixed_sequence_mask = batch['motif_seq_mask'].squeeze(0).to(self.device)
-            x_motif = batch['motif_structure'].squeeze(0).to(self.device)
-            fixed_structure_mask = fixed_sequence_mask[:, :, None] * fixed_sequence_mask[:, None, :]
+        # Inference config overrides training defaults when available
+        if self.inf_cfg is not None:
+            nsteps = self.inf_cfg.get("nsteps", self.meanflow_nsteps_sample)
+            fold_cond = self.inf_cfg.get("fold_cond", self.cfg_exp.training.get("fold_cond", False))
         else:
-            fixed_sequence_mask, x_motif, fixed_structure_mask = None, None, None
-            fixed_sequence_mask = None
+            nsteps = self.meanflow_nsteps_sample
+            fold_cond = self.cfg_exp.training.get("fold_cond", False)
 
+        mask = batch['mask'].squeeze(0) if 'mask' in batch else None
+        cath_code = _extract_cath_code(batch) if fold_cond else None
 
         x = self.generate(
             nsamples=batch["nsamples"],
             n=batch["nres"],
-            dt=batch["dt"].to(dtype=torch.float32),
-            self_cond=self.inf_cfg.self_cond,
-            cath_code=cath_code,
-            guidance_weight=guidance_weight,
-            autoguidance_ratio=autoguidance_ratio,
+            nsteps=nsteps,
             dtype=torch.float32,
-            schedule_mode=self.inf_cfg.schedule.schedule_mode,
-            schedule_p=self.inf_cfg.schedule.schedule_p,
-            sampling_mode=sampling_args["sampling_mode"],
-            sc_scale_noise=sampling_args["sc_scale_noise"],
-            sc_scale_score=sampling_args["sc_scale_score"],
-            gt_mode=sampling_args["gt_mode"],
-            gt_p=sampling_args["gt_p"],
-            gt_clamp_val=sampling_args["gt_clamp_val"],
-            mask = mask,
-            x_motif = x_motif,
-            fixed_sequence_mask = fixed_sequence_mask,
-            fixed_structure_mask = fixed_structure_mask,
+            mask=mask,
+            cath_code=cath_code,
         )
         return self.samples_to_atom37(x)  # [b, n, 37, 3]
 
@@ -519,56 +604,35 @@ class ModelTrainerBase(L.LightningModule):
         self,
         nsamples: int,
         n: int,
-        dt: float,
-        self_cond: bool,
-        cath_code: List[List[str]],
-        guidance_weight: float = 1.0,
-        autoguidance_ratio: float = 0.0,
+        nsteps: int = 1,
         dtype: torch.dtype = None,
-        schedule_mode: str = "uniform",
-        schedule_p: float = 1.0,
-        sampling_mode: str = "sc",
-        sc_scale_noise: float = "1.0",
-        sc_scale_score: float = "1.0",
-        gt_mode: Literal["us", "tan"] = "us",
-        gt_p: float = 1.0,
-        gt_clamp_val: float = None,
-        mask = None,
-        x_motif = None,
-        fixed_sequence_mask = None,
-        fixed_structure_mask = None,
-    ) -> Dict[str, Tensor]:
+        mask=None,
+        cath_code=None,
+        **kwargs,
+    ) -> Tensor:
         """
-        Generates samples by integrating ODE with learned vector field.
+        Generates samples using MeanFlow average velocity field.
+        1-step: z_0 = z_1 - u(z_1, r=0, t=1)
+        Multi-step: iterate over intervals from t=1 to t=0.
         """
-        predict_clean_n_v_w_guidance = partial(
-            self.predict_clean_n_v_w_guidance,
-            guidance_weight=guidance_weight,
-            autoguidance_ratio=autoguidance_ratio,
-        )
         if mask is None:
             mask = torch.ones(nsamples, n).long().bool().to(self.device)
-        return self.fm.full_simulation(
-            predict_clean_n_v_w_guidance,
-            dt=dt,
-            nsamples=nsamples,
-            n=n,
-            self_cond=self_cond,
-            cath_code=cath_code,
-            device=self.device,
-            mask=mask,
-            dtype=dtype,
-            schedule_mode=schedule_mode,
-            schedule_p=schedule_p,
-            sampling_mode=sampling_mode,
-            sc_scale_noise=sc_scale_noise,
-            sc_scale_score=sc_scale_score,
-            gt_mode=gt_mode,
-            gt_p=gt_p,
-            gt_clamp_val=gt_clamp_val,
-            x_motif = x_motif,
-            fixed_sequence_mask = fixed_sequence_mask,
-            fixed_structure_mask = fixed_structure_mask,
+
+        def predict_u(z, t, r, mask):
+            # PAPER CONVENTION: t and r are scalars broadcast to batch
+            batch_nn = {
+                "x_t": z,
+                "t": t,
+                "h": t - r,
+                "mask": mask,
+            }
+            if cath_code is not None:
+                batch_nn["cath_code"] = cath_code
+            nn_out = self.nn(batch_nn)
+            return nn_out["coors_pred"]
+
+        return self.fm.meanflow_sample(
+            predict_u, nsamples, n, self.device, mask, nsteps, dtype
         )
 
 

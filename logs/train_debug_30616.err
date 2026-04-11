@@ -1,0 +1,15 @@
+/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/graphein_utils/graphein_utils.py:499: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:206.)
+  positions[residue_indices, atom_indices] = torch.tensor(
+Traceback (most recent call last):
+  File "/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/scripts/prepare_debug_data.py", line 101, in <module>
+    main()
+  File "/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/scripts/prepare_debug_data.py", line 78, in main
+    fname = process_protein(pdb_name)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/scripts/prepare_debug_data.py", line 67, in process_protein
+    chain_break_transform = ChainBreakPerResidueTransform()
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: Can't instantiate abstract class ChainBreakPerResidueTransform with abstract method forward
+slurmstepd-H100Azure02: error: *** JOB 30616 ON H100Azure02 CANCELLED AT 2026-04-11T02:02:32 ***
+slurmstepd-H100Azure02: error: *** STEP 30616.0 ON H100Azure02 CANCELLED AT 2026-04-11T02:02:32 ***
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.

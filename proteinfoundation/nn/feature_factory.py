@@ -349,6 +349,34 @@ class TimeEmbeddingPairFeat(Feature):
         return t_emb.expand((t_emb.shape[0], n, n, t_emb.shape[3]))  # [b, n, t_emb_dim]
 
 
+class DeltaTEmbeddingSeqFeat(Feature):
+    """Embeds h = t - r (MeanFlow time interval) as seq feature [b, n, t_emb_dim]."""
+
+    def __init__(self, t_emb_dim, **kwargs):
+        super().__init__(dim=t_emb_dim)
+
+    def forward(self, batch):
+        h = batch.get("h", torch.zeros_like(batch["t"]))  # [b]; h=0 when r=t (FM mode)
+        n = batch["mask"].shape[1]
+        h_emb = get_time_embedding(h, edim=self.dim)  # [b, t_emb_dim]
+        h_emb = h_emb[:, None, :]  # [b, 1, t_emb_dim]
+        return h_emb.expand((h_emb.shape[0], n, h_emb.shape[2]))  # [b, n, t_emb_dim]
+
+
+class DeltaTEmbeddingPairFeat(Feature):
+    """Embeds h = t - r (MeanFlow time interval) as pair feature [b, n, n, t_emb_dim]."""
+
+    def __init__(self, t_emb_dim, **kwargs):
+        super().__init__(dim=t_emb_dim)
+
+    def forward(self, batch):
+        h = batch.get("h", torch.zeros_like(batch["t"]))  # [b]; h=0 when r=t (FM mode)
+        n = batch["mask"].shape[1]
+        h_emb = get_time_embedding(h, edim=self.dim)  # [b, t_emb_dim]
+        h_emb = h_emb[:, None, None, :]  # [b, 1, 1, t_emb_dim]
+        return h_emb.expand((h_emb.shape[0], n, n, h_emb.shape[3]))  # [b, n, n, t_emb_dim]
+
+
 class IdxEmbeddingSeqFeat(Feature):
     """Computes index embedding and returns sequence feature of shape [b, n, idx_emb]."""
 
@@ -603,6 +631,8 @@ class FeatureFactory(torch.nn.Module):
         if self.mode == "seq":
             if f == "time_emb":
                 return TimeEmbeddingSeqFeat(**kwargs)
+            elif f == "delta_t_emb":
+                return DeltaTEmbeddingSeqFeat(**kwargs)
             elif f == "res_seq_pdb_idx":
                 return IdxEmbeddingSeqFeat(**kwargs)
             elif f == "chain_break_per_res":
@@ -627,6 +657,8 @@ class FeatureFactory(torch.nn.Module):
                 return SequenceSeparationPairFeat(**kwargs)
             elif f == "time_emb":
                 return TimeEmbeddingPairFeat(**kwargs)
+            elif f == "delta_t_emb":
+                return DeltaTEmbeddingPairFeat(**kwargs)
             elif f == "motif_x1_pair_dists":
                 return MotifX1PairwiseDistancesPairFeat(**kwargs)
             elif f == "motif_structure_mask":
