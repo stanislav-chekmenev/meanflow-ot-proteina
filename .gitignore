@@ -7,11 +7,15 @@ lightning_logs
 .ipynb_checkpoints/
 
 .DS_Store
+.claude
 
 .vscode/
 .venv
+venv.tar.gz
 .env
 .logs/
+logs
+store
 wandb/
 **.svg
 **.npy

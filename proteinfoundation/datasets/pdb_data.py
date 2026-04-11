@@ -373,7 +373,7 @@ class PDBDataset(Dataset):
 
         if self.in_memory:
             logger.info("Reading data into memory")
-            self.data = [torch.load(self.processed_dir / f) for f in tqdm(file_names)]
+            self.data = [torch.load(self.processed_dir / f"{f}.pt", weights_only=False) for f in tqdm(file_names)]
 
     def __len__(self):
         return len(self.file_names)

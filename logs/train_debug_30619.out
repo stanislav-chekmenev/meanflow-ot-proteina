@@ -1,0 +1,14 @@
+===========================================
+Job started: Sat Apr 11 02:22:47 AM CEST 2026
+Running on: H100Azure03
+Job ID: 30619
+GPU devices: 0
+===========================================
+Setting up virtual environment on node-local scratch...
+H100Azure03: env unpacked to /netscratch/schekmenev/venvs/meanflow-ot-proteina/.venv
+Virtual environment set up at /netscratch/schekmenev/venvs/meanflow-ot-proteina/.venv
+Processing debug protein...
+Starting MeanFlow debug training...
+===========================================
+Job completed: Sat Apr 11 02:31:43 AM CEST 2026
+===========================================

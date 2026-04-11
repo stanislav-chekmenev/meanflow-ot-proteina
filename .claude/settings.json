@@ -5,7 +5,37 @@
       "Bash(python -m pytest tests/test_training_step.py -v --tb=short)",
       "Bash(python tests/test_jvp_smoke.py)",
       "Bash(python -m pytest tests/test_ot_integration.py::TestOTIntegrationWithFlowMatcher::test_ot_reduces_average_transport_distance -v --tb=short)",
-      "Bash(python scripts/prepare_debug_data.py)"
+      "Bash(python scripts/prepare_debug_data.py)",
+      "Bash(tu)",
+      "Bash(squeue -u schekmenev)",
+      "Bash(sbatch scripts/train_debug.sbatch)",
+      "Bash(scancel *)",
+      "Bash(cat logs/*)",
+      "Bash(tail *)",
+      "Bash(head *)",
+      "Bash(ls logs/*)",
+      "Bash(squeue *)",
+      "Read(//mnt/labs/home/schekmenev/projects/quality-graft/**)",
+      "Read(//mnt/labs/home/schekmenev/projects/quality-graft/src/**)",
+      "Read(//mnt/labs/home/schekmenev/projects/quality-graft/configs/**)",
+      "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"import numpy; print\\('numpy:', numpy.__version__\\)\")",
+      "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"import pandas; print\\('pandas:', pandas.__version__\\)\")",
+      "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/pip show:*)",
+      "Bash(uv sync:*)",
+      "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"import pandas; print\\('pandas:', pandas.__version__\\); import numpy; print\\('numpy:', numpy.__version__\\); import wandb; print\\('wandb:', wandb.__version__\\)\")",
+      "Bash(tar czf:*)",
+      "Bash(python -m py_compile proteinfoundation/train.py)",
+      "Bash(python -m pytest tests/ -x --tb=short)",
+      "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"import torch; print\\('torch:', torch.__version__, '+', torch.version.cuda\\)\")",
+      "Bash(uv pip:*)",
+      "Bash(pip install:*)",
+      "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"import torch; print\\('torch:', torch.__version__, 'CUDA:', torch.version.cuda\\)\")",
+      "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"from torch_scatter import scatter_mean; print\\('torch_scatter OK'\\)\")",
+      "Bash(ls -la /mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/logs/train_debug_30636.*)",
+      "Bash(ls -lt /mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/logs/train_debug_*.err)"
+    ],
+    "additionalDirectories": [
+      "/netscratch/schekmenev/venvs/meanflow-ot-proteina"
     ]
   }
 }
