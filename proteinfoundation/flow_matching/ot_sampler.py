@@ -16,6 +16,7 @@ from functools import partial
 from typing import Tuple, Union
 
 import numpy as np
+import scipy
 import ot as pot
 import torch
 from torch import Tensor
@@ -157,13 +158,13 @@ class OTPlanSampler:
         j : numpy array, shape (bs,)
             permutation indices for x0 that minimize transport cost to x1
         """
-        import scipy
-
         if x0.dim() > 2:
             x0 = x0.reshape(x0.shape[0], -1)
         if x1.dim() > 2:
             x1 = x1.reshape(x1.shape[0], -1)
-        M = torch.cdist(x0.detach(), x1.detach()) ** 2
+        # M[i,j] = ||x1[i] - x0[j]||^2 so that j[i] gives the x0 index
+        # that should pair with x1[i], and x0[j] is the correct permutation.
+        M = torch.cdist(x1.detach(), x0.detach()) ** 2
         if self.normalize_cost:
             M = M / M.max()
         _, j = scipy.optimize.linear_sum_assignment(M.cpu().numpy())
@@ -221,8 +222,6 @@ class MaskedOTPlanSampler:
         Returns:
             Tuple of (x_0_permuted, x_1_unchanged), both shape [B, N, 3].
         """
-        import scipy
-
         B, N, D = x_0.shape
 
         # Zero out padded positions so they don't affect OT cost
@@ -230,8 +229,9 @@ class MaskedOTPlanSampler:
         x_0_masked = (x_0 * mask_3d).reshape(B, -1)  # [B, N*3]
         x_1_masked = (x_1 * mask_3d).reshape(B, -1)  # [B, N*3]
 
-        # Compute cost matrix
-        M = torch.cdist(x_0_masked, x_1_masked) ** 2  # [B, B]
+        # Cost matrix: M[i,j] = ||x_1[i] - x_0[j]||^2 so that j[i] gives
+        # the x_0 index that should pair with x_1[i].
+        M = torch.cdist(x_1_masked, x_0_masked) ** 2  # [B, B]
         if self.ot_plan_sampler.normalize_cost:
             M = M / M.max()
 
@@ -265,8 +265,6 @@ class MaskedOTPlanSampler:
         Returns:
             j: numpy array of shape (B,), permutation indices for x_0.
         """
-        import scipy
-
         B = x_0.shape[0]
 
         # Zero out padded positions so they don't affect OT cost
@@ -274,8 +272,9 @@ class MaskedOTPlanSampler:
         x_0_masked = (x_0 * mask_3d).reshape(B, -1)  # [B, N*3]
         x_1_masked = (x_1 * mask_3d).reshape(B, -1)  # [B, N*3]
 
-        # Compute cost matrix
-        M = torch.cdist(x_0_masked, x_1_masked) ** 2  # [B, B]
+        # Cost matrix: M[i,j] = ||x_1[i] - x_0[j]||^2 so that j[i] gives
+        # the x_0 index that should pair with x_1[i].
+        M = torch.cdist(x_1_masked, x_0_masked) ** 2  # [B, B]
         if self.ot_plan_sampler.normalize_cost:
             M = M / M.max()
 

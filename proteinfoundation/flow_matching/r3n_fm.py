@@ -58,7 +58,7 @@ class R3NFlowMatcher:
 
     def _apply_mask(
         self, x: Float[Tensor, "* n 3"], mask: Optional[Bool[Tensor, "* n"]] = None
-    ) -> Dict[str, Tensor]:
+    ) -> Tensor:
         """
         Applies mask to x. Sets masked elements to zero.
 
@@ -75,7 +75,7 @@ class R3NFlowMatcher:
 
     def _mask_and_zero_com(
         self, x, mask: Optional[Bool[Tensor, "* n"]] = None
-    ) -> Dict[str, Tensor]:
+    ) -> Tensor:
         """
         Applies mask to and centers x if needed (if zero_com=True).
 
@@ -538,6 +538,112 @@ class R3NFlowMatcher:
                     mask=mask,
                 )
             return x
+
+    # ---- MeanFlow methods ----
+
+    @staticmethod
+    def _logit_normal_timestep_sample(
+        P_mean: float, P_std: float, num_samples: int, device: torch.device
+    ) -> Tensor:
+        """Sample timesteps from a logit-normal distribution, clipped to [0, 1]."""
+        rnd_normal = torch.randn((num_samples,), device=device)
+        time = torch.sigmoid(rnd_normal * P_std + P_mean)
+        time = torch.clip(time, min=0.0, max=1.0)
+        return time
+
+    def sample_two_timesteps(
+        self,
+        shape: Tuple,
+        device: torch.device,
+        ratio: float = 0.25,
+        P_mean_t: float = -0.4,
+        P_std_t: float = 1.0,
+        P_mean_r: float = -0.4,
+        P_std_r: float = 1.0,
+    ) -> Tuple[Tensor, Tensor]:
+        """Sample (t, r) pair for MeanFlow training.
+
+        PAPER CONVENTION: t is the noise-side time, r is the data-side time, t >= r.
+        With probability (1 - ratio), r = t (collapses to standard FM).
+
+        Args:
+            shape: batch shape tuple, e.g. (B,)
+            device: torch device
+            ratio: probability that r != t (MeanFlow mode)
+            P_mean_t: mean of logit-normal distribution for t
+            P_std_t: std of logit-normal distribution for t
+            P_mean_r: mean of logit-normal distribution for r
+            P_std_r: std of logit-normal distribution for r
+
+        Returns:
+            t: Tensor of shape ``shape``, values in [0, 1]
+            r: Tensor of shape ``shape``, values in [0, 1], r <= t
+        """
+        num_samples = shape[0] if isinstance(shape, tuple) else shape
+
+        # Step 1: sample two independent logit-normal timesteps
+        t = self._logit_normal_timestep_sample(P_mean_t, P_std_t, num_samples, device)
+        r = self._logit_normal_timestep_sample(P_mean_r, P_std_r, num_samples, device)
+
+        # Step 2: with probability (1 - ratio), collapse r = t (standard FM)
+        prob = torch.rand(num_samples, device=device)
+        mask = prob < 1 - ratio
+        r = torch.where(mask, t, r)
+
+        # Step 3: ensure t >= r
+        r = torch.minimum(t, r)
+
+        return t, r
+
+    def meanflow_sample(
+        self,
+        predict_u_fn: Callable,
+        nsamples: int,
+        n: int,
+        device: torch.device,
+        mask: Bool[Tensor, "* n"],
+        nsteps: int = 1,
+        dtype: Optional[torch.dtype] = None,
+    ) -> Tensor:
+        """Generate samples using MeanFlow average velocity field.
+
+        PAPER CONVENTION: noise at t=1, data at t=0.
+        1-step: z_0 = z_1 - u(z_1, r=0, t=1)
+        Multi-step: iterate z_r = z_t - (t-r)*u(z_t, r, t) over intervals [1, 0].
+
+        Args:
+            predict_u_fn: function(z, t, r, mask) -> u prediction
+            nsamples: number of samples
+            n: sequence length
+            device: torch device
+            mask: boolean mask [nsamples, n]
+            nsteps: number of integration steps (1 = one-shot)
+            dtype: optional dtype
+
+        Returns:
+            Generated samples, shape [nsamples, n, 3]
+        """
+        with torch.no_grad():
+            z = self.sample_reference(
+                n, shape=(nsamples,), device=device, mask=mask, dtype=dtype
+            )  # [nsamples, n, 3]
+
+            if nsteps == 1:
+                t_val = torch.ones(nsamples, device=device)
+                r_val = torch.zeros(nsamples, device=device)
+                u = predict_u_fn(z, t_val, r_val, mask)
+                z_0 = z - u  # data = noise - u(noise, 0, 1)
+                return self._mask_and_zero_com(z_0, mask)
+            else:
+                # Divide [1, 0] into nsteps intervals
+                ts = torch.linspace(1.0, 0.0, nsteps + 1, device=device)
+                for i in range(nsteps):
+                    t_cur = ts[i] * torch.ones(nsamples, device=device)
+                    t_next = ts[i + 1] * torch.ones(nsamples, device=device)
+                    u = predict_u_fn(z, t_cur, t_next, mask)
+                    z = z - (ts[i] - ts[i + 1]) * u  # z_r = z_t - (t-r)*u
+                    z = self._mask_and_zero_com(z, mask)
+                return z
 
     def get_gt(
         self,

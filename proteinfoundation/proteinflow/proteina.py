@@ -10,6 +10,7 @@
 
 
 import os
+import warnings
 from math import prod
 from typing import Dict
 
@@ -89,7 +90,33 @@ class Proteina(ModelTrainerBase):
                 cfg_exp.model.nn.feats_pair_repr.append("motif_x1_pair_dists")
             self.motif_factory = SingleMotifFactory(motif_prob=cfg_exp.training.get("motif_prob", 1.0))
 
+        # MeanFlow hyperparams
+        mf_cfg = cfg_exp.training.get("meanflow", {})
+        self.meanflow_norm_p = mf_cfg.get("norm_p", 1.0)
+        self.meanflow_norm_eps = mf_cfg.get("norm_eps", 1e-3)
+        self.meanflow_ratio = mf_cfg.get("ratio", 0.25)
+        self.meanflow_P_mean_t = mf_cfg.get("P_mean_t", mf_cfg.get("P_mean", -0.4))
+        self.meanflow_P_std_t = mf_cfg.get("P_std_t", mf_cfg.get("P_std", 1.0))
+        self.meanflow_P_mean_r = mf_cfg.get("P_mean_r", mf_cfg.get("P_mean", -0.4))
+        self.meanflow_P_std_r = mf_cfg.get("P_std_r", mf_cfg.get("P_std", 1.0))
+        self.meanflow_nsteps_sample = mf_cfg.get("nsteps_sample", 1)
+
+        if cfg_exp.loss.get("use_aux_loss", False):
+            warnings.warn(
+                "use_aux_loss=True has no effect in MeanFlow training.",
+                UserWarning, stacklevel=2,
+            )
+        if cfg_exp.training.get("self_cond", False):
+            warnings.warn(
+                "self_cond=True has no effect in MeanFlow training.",
+                UserWarning, stacklevel=2,
+            )
+
         # Neural network
+        # JVP incompatible with torch.utils.checkpoint (used in PairReprUpdate)
+        assert not cfg_exp.model.nn.get(
+            "update_pair_repr", False
+        ), "update_pair_repr must be False for MeanFlow (torch.func.jvp incompatible with torch.utils.checkpoint)"
         self.nn = ProteinTransformerAF3(**cfg_exp.model.nn)
 
         self.nparams = sum(p.numel() for p in self.nn.parameters() if p.requires_grad)
@@ -178,7 +205,7 @@ class Proteina(ModelTrainerBase):
         mask: Bool[Tensor, "* nres"],
         log_prefix: str,
     ) -> Float[Tensor, "*"]:
-        """
+        """[LEGACY - not used in MeanFlow training/inference]
         Computes and logs flow matching loss.
 
         Args:
@@ -224,7 +251,7 @@ class Proteina(ModelTrainerBase):
         log_prefix: str,
         batch: Dict[str, Tensor] = None,
     ) -> Float[Tensor, ""]:
-        """
+        """[LEGACY - not used in MeanFlow training/inference]
         Computes and logs auxiliary losses.
 
         Args:

@@ -1,0 +1,80 @@
+run_name_: debug_1ubq
+
+hardware:
+  ncpus_per_task_train_: 8
+  ncpus_per_task_prepro_: 8
+  accelerator: gpu
+  ngpus_per_node_: 1
+  nnodes_: 1
+
+loss:
+  t_distribution:
+    name: mix_up02_beta
+    p1: 1.9
+    p2: 1.0
+  loss_t_clamp: 0.9
+  use_aux_loss: False
+  aux_loss_t_lim: 0.3
+  thres_aux_2d_loss: 0.6
+  aux_loss_weight: 1.0
+  num_dist_buckets: 64
+  max_dist_boundary: 1.0
+
+defaults:
+  - model: caflow
+  - _self_
+
+# Point to debug dataset
+dataset: pdb_debug
+dataset_config_subdir: pdb
+
+force_precision_f32: False
+
+training:
+  self_cond: False
+  fold_cond: False
+  mask_T_prob: 0.5
+  mask_A_prob: 0.5
+  mask_C_prob: 0.5
+  fold_label_sample_ratio: [0.5, 0.1, 0.15, 0.25]
+  ot_coupling:
+    enabled: True
+    method: exact
+    reg: 0.05
+    reg_m: 1.0
+    normalize_cost: False
+  meanflow:
+    # Current proteina defaults.
+    # For reference, CIFAR10 MeanFlow v1 uses: ratio=0.75, P_mean_t=-0.6,
+    # P_std_t=1.6, P_mean_r=-4.0, P_std_r=1.6, norm_p=0.75.
+    ratio: 0.25
+    P_mean_t: -0.4
+    P_std_t: 1.0
+    P_mean_r: -0.4
+    P_std_r: 1.0
+    norm_p: 1.0
+    norm_eps: 0.001
+    nsteps_sample: 1
+
+opt:
+  lr: 0.0001
+  max_epochs: 500            # Short debug run
+  log_every_n_steps: 1
+  accumulate_grad_batches: 1
+  val_check_interval: 999999  # Effectively disable validation (empty val set)
+  skip_nan_grad: False
+  grad_and_weight_analysis: False
+  dist_strategy: ddp
+
+log:
+  wandb_project: protein_transformer_big_runs
+  log_wandb: False     # No wandb for debug
+  checkpoint: False    # No checkpoints for debug
+
+seed: 42
+
+ema:
+  decay: 0.0            # Disable EMA for debug speed
+  validate_original_weights: False
+  every_n_steps: 1
+  cpu_offload: False

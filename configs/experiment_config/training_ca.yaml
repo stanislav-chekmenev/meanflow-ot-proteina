@@ -17,7 +17,7 @@ loss:
     p1: 1.9
     p2: 1.0
   loss_t_clamp: 0.9  # Used for loss stability in frameflow, 1. for no clamping
-  use_aux_loss: True  # Whether to use auxiliary loss
+  use_aux_loss: False  # Unused in MeanFlow training
   aux_loss_t_lim: 0.3  # Time limit to apply auxiliary loss
   thres_aux_2d_loss: 0.6  # This is nm not Å
   aux_loss_weight: 1.0
@@ -36,7 +36,7 @@ dataset_config_subdir: pdb
 force_precision_f32: False  # If false will use bf16-mixed precision
 
 training:
-  self_cond: True
+  self_cond: False  # Unused in MeanFlow training
   fold_cond: False
   mask_T_prob: 0.5
   mask_A_prob: 0.5
@@ -48,6 +48,15 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
+  meanflow:
+    ratio: 0.25
+    P_mean_t: -0.4
+    P_std_t: 1.0
+    P_mean_r: -0.4
+    P_std_r: 1.0
+    norm_p: 1.0
+    norm_eps: 0.001
+    nsteps_sample: 1
 
 opt:
   lr: 0.0001

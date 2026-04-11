@@ -1,0 +1,23 @@
+datamodule:
+  _target_: "proteinfoundation.datasets.pdb_data.PDBLightningDataModule"
+  data_dir: ${oc.env:DATA_PATH}/debug/
+  in_memory: True  # 1 protein, just keep it in memory
+  format: "cif"
+  overwrite: False
+  batch_padding: True
+  sampling_mode: "random"
+  transforms:
+    - _target_: "proteinfoundation.datasets.transforms.GlobalRotationTransform"
+    - _target_: "proteinfoundation.datasets.transforms.ChainBreakPerResidueTransform"
+  batch_size: 1
+  num_workers: 0
+  pin_memory: False
+
+  # No dataselector — data is user-provided in data_dir/raw/
+  dataselector: null
+
+  datasplitter:
+    _target_: "proteinfoundation.datasets.pdb_data.PDBDataSplitter"
+    data_dir: ${oc.env:DATA_PATH}/debug/
+    train_val_test: [1.0, 0.0, 0.0]
+    split_type: "random"
