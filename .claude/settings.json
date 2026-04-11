@@ -5,7 +5,16 @@
       "Bash(python -m pytest tests/test_training_step.py -v --tb=short)",
       "Bash(python tests/test_jvp_smoke.py)",
       "Bash(python -m pytest tests/test_ot_integration.py::TestOTIntegrationWithFlowMatcher::test_ot_reduces_average_transport_distance -v --tb=short)",
-      "Bash(python scripts/prepare_debug_data.py)"
+      "Bash(python scripts/prepare_debug_data.py)",
+      "Bash(tu)",
+      "Bash(squeue -u schekmenev)",
+      "Bash(sbatch scripts/train_debug.sbatch)",
+      "Bash(scancel *)",
+      "Bash(cat logs/*)",
+      "Bash(tail *)",
+      "Bash(head *)",
+      "Bash(ls logs/*)",
+      "Bash(squeue *)"
     ]
   }
 }

@@ -28,7 +28,7 @@ DATA_ROOT="/netscratch/schekmenev"
 #   tar czf "$PROJECT_ROOT/venv.tar.gz" -C "$PROJECT_ROOT" .venv
 PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 ENV_TARBALL="$PROJECT_ROOT/venv.tar.gz"
-ENV_LOCAL="$DATA_ROOT/venvs/$PROJECT_NAME/.venv"
+ENV_LOCAL="$DATA_ROOT/venvs/$PROJECT_NAME/.venv"    
 
 echo "Setting up virtual environment on node-local scratch..."
 if [ ! -d "$ENV_LOCAL/bin" ]; then
