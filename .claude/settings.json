@@ -32,7 +32,24 @@
       "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"import torch; print\\('torch:', torch.__version__, 'CUDA:', torch.version.cuda\\)\")",
       "Bash(/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/.venv/bin/python -c \"from torch_scatter import scatter_mean; print\\('torch_scatter OK'\\)\")",
       "Bash(ls -la /mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/logs/train_debug_30636.*)",
-      "Bash(ls -lt /mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/logs/train_debug_*.err)"
+      "Bash(ls -lt /mnt/labs/home/schekmenev/projects/meanflow-ot-proteina/logs/train_debug_*.err)",
+      "WebFetch(domain:wandb.ai)",
+      "WebSearch",
+      "WebFetch(domain:docs.wandb.ai)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Read(//mnt/labs/home/schekmenev/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.7/skills/subagent-driven-development/**)",
+      "Bash(python3 -c \"import wandb; import inspect; print\\(inspect.getsource\\(wandb.Molecule.__init__\\)\\)\")",
+      "Bash(python3 -c \"import wandb; import inspect; print\\(inspect.getsource\\(wandb.Molecule._set_file\\)\\)\")",
+      "Bash(python3 -c \"import wandb; import inspect; cls = wandb.Molecule; mro = [c for c in cls.__mro__ if hasattr\\(c, '_set_file'\\)]; print\\([c.__name__ for c in mro]\\); print\\(inspect.getsource\\(mro[0]._set_file\\)\\)\")",
+      "Bash(python3 -c \"import wandb; import inspect; print\\(inspect.getsource\\(wandb.Molecule.to_json\\)\\)\")",
+      "Bash(python3 -c \"import wandb; import inspect; cls = wandb.Molecule; mro = [c for c in cls.__mro__ if hasattr\\(c, 'to_json'\\)]; print\\(inspect.getsource\\(mro[0].to_json\\)\\)\")",
+      "Bash(python3 -c ':*)",
+      "Bash(python3 -c \"import wandb; print\\(wandb.Molecule.SUPPORTED_TYPES\\)\")",
+      "Bash(python -m py_compile proteinfoundation/callbacks/__init__.py)",
+      "Bash(python -m py_compile proteinfoundation/callbacks/protein_eval.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('proteinfoundation/train.py'\\).read\\(\\)\\); print\\('OK: train.py syntax'\\)\")",
+      "Bash(python3 -c \"import inspect, wandb; print\\(inspect.getsourcefile\\(wandb.Molecule\\)\\)\")"
     ],
     "additionalDirectories": [
       "/netscratch/schekmenev/venvs/meanflow-ot-proteina"
