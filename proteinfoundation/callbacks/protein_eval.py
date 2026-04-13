@@ -44,6 +44,16 @@ class ProteinEvalCallback(Callback):
         # is active (on_train_batch_end fires per micro-batch).
         self._last_eval_step = -1
         self._gt_logged = False
+        self._metric_defined = False
+
+    # ------------------------------------------------------------------
+    def _ensure_wandb_metric(self, trainer):
+        """Define a custom WandB x-axis for eval/* metrics so they are not
+        rejected by the monotonic-step constraint of ``wandb.log(step=...)``."""
+        if self._metric_defined:
+            return
+        trainer.logger.experiment.define_metric("eval/*", step_metric="eval/global_step")
+        self._metric_defined = True
 
     # ------------------------------------------------------------------
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
@@ -93,9 +103,12 @@ class ProteinEvalCallback(Callback):
             )
 
             # --- Log generated protein to WandB -----------------------------
+            self._ensure_wandb_metric(trainer)
             trainer.logger.experiment.log(
-                {"eval/generated_protein": wandb.Molecule(tmp_path)},
-                step=trainer.global_step,
+                {
+                    "eval/global_step": step,
+                    "eval/generated_protein": wandb.Molecule(tmp_path),
+                },
             )
 
             # --- Log ground truth once ---------------------------------------
@@ -106,11 +119,11 @@ class ProteinEvalCallback(Callback):
             ):
                 trainer.logger.experiment.log(
                     {
+                        "eval/global_step": step,
                         "eval/ground_truth_protein": wandb.Molecule(
                             self.ground_truth_pdb_path
-                        )
+                        ),
                     },
-                    step=trainer.global_step,
                 )
                 self._gt_logged = True
 
