@@ -102,6 +102,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Shows progress bar as training progresses.",
     )
+    parser.add_argument(
+        "--exp_overrides",
+        nargs="*",
+        default=[],
+        help="Hydra overrides for the experiment config, e.g. opt.accumulate_grad_batches=4",
+    )
+    parser.add_argument(
+        "--data_overrides",
+        nargs="*",
+        default=[],
+        help="Hydra overrides for the dataset config, e.g. datamodule.batch_size=32",
+    )
     args = parser.parse_args()
 
     logger.add(
@@ -114,7 +126,7 @@ if __name__ == "__main__":
     # Load experiment config
     config_path = "../configs/experiment_config"
     with hydra.initialize(config_path, version_base=hydra.__version__):
-        cfg_exp = hydra.compose(config_name=args.config_name)
+        cfg_exp = hydra.compose(config_name=args.config_name, overrides=args.exp_overrides)
         if args.single:
             # Rewrite number of GPUs and nodes for local runs or if single flag is used
             cfg_exp.hardware.ngpus_per_node_ = 1
@@ -191,7 +203,7 @@ if __name__ == "__main__":
     else:
         config_path = "../configs/datasets_config/"
     with hydra.initialize(config_path, version_base=hydra.__version__):
-        cfg_data = hydra.compose(config_name=cfg_exp["dataset"])
+        cfg_data = hydra.compose(config_name=cfg_exp["dataset"], overrides=args.data_overrides)
         cfg_data.datamodule.num_workers = num_cpus  # Overwrite number of cpus
         if cfg_data.get("exclude_id_pkl_path") is not None:
             with open(cfg_data.exclude_id_pkl_path, "rb") as fin:
@@ -240,6 +252,7 @@ if __name__ == "__main__":
             ProteinEvalCallback(
                 eval_every_n_steps=eval_cfg.every_n_steps,
                 n_residues=eval_cfg.n_residues,
+                run_name=run_name,
                 ground_truth_pdb_path=gt_path,
             )
         )

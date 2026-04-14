@@ -113,12 +113,12 @@ class TestOTPlanSampler:
         """sample_plan_with_scipy should return valid permutation indices."""
         sampler = OTPlanSampler(method="exact")
         j = sampler.sample_plan_with_scipy(x0_3d, x1_3d)
-        B = x0_3d.shape[0]
+        B = x1_3d.shape[0]
         assert len(j) == B
         assert set(j) == set(range(B)), "Indices should be a permutation of 0..B-1"
         # Using the indices on original (non-flattened) tensor should preserve shape
-        x0_permuted = x0_3d[j]
-        assert x0_permuted.shape == x0_3d.shape
+        x1_permuted = x1_3d[j]
+        assert x1_permuted.shape == x1_3d.shape
 
 
 # ===========================================================================
@@ -141,16 +141,6 @@ class TestMaskedOTPlanSampler:
         assert x0_out.shape == (BATCH_SIZE, N_RESIDUES, DIM)
         assert x1_out.shape == (BATCH_SIZE, N_RESIDUES, DIM)
 
-    def test_x1_order_preserved(
-        self,
-        x0_3d: torch.Tensor,
-        x1_3d: torch.Tensor,
-        full_mask: torch.Tensor,
-    ) -> None:
-        """x1 should be returned without permutation."""
-        sampler = MaskedOTPlanSampler()
-        _, x1_out = sampler.sample_plan(x0_3d, x1_3d, full_mask)
-        torch.testing.assert_close(x1_out, x1_3d)
 
     def test_output_is_permutation_of_input(
         self,
@@ -176,7 +166,9 @@ class TestMaskedOTPlanSampler:
     ) -> None:
         """OT-paired cost should be <= identity pairing cost."""
         sampler = MaskedOTPlanSampler()
-        x0_out, x1_out = sampler.sample_plan(x0_3d, x1_3d, full_mask)
+        j = sampler.sample_plan_with_scipy(x0_3d, x1_3d, full_mask)
+        x0_out = x0_3d
+        x1_out = x1_3d[j]
 
         # Identity pairing cost: sum of squared distances with original order
         identity_cost = ((x0_3d - x1_3d) ** 2).sum().item()
@@ -198,15 +190,15 @@ class TestMaskedOTPlanSampler:
 
         # Mask 1: all residues valid
         mask_full = torch.ones(B, N, dtype=torch.bool)
-        x0_full, _ = sampler.sample_plan(x0, x1, mask_full)
+        _, x1_full = sampler.sample_plan(x0, x1, mask_full)
 
         # Mask 2: only first half valid
         mask_half = torch.zeros(B, N, dtype=torch.bool)
         mask_half[:, : N // 2] = True
-        x0_half, _ = sampler.sample_plan(x0, x1, mask_half)
+        _, x1_half = sampler.sample_plan(x0, x1, mask_half)
 
         # The permutations should differ (with high probability for these inputs)
-        assert not torch.allclose(x0_full, x0_half), (
+        assert not torch.allclose(x1_full, x1_half), (
             "Different masks should produce different OT assignments"
         )
 
@@ -228,11 +220,11 @@ class TestMaskedOTPlanSampler:
 
         assert x0_out.shape == (B, N, 3)
         assert x1_out.shape == (B, N, 3)
-        # x1 should be unchanged
-        torch.testing.assert_close(x1_out, x1)
-        # x0_out rows should be permutation of x0 rows
+        # x0 should be unchanged
+        torch.testing.assert_close(x0_out, x0)
+        # x1_out rows should be permutation of x0 rows
         for i in range(B):
-            diffs = (x0 - x0_out[i : i + 1]).abs().sum(dim=(1, 2))
+            diffs = (x1 - x1_out[i : i + 1]).abs().sum(dim=(1, 2))
             assert diffs.min().item() < 1e-6
 
 
@@ -265,9 +257,9 @@ class TestMaskedSamplePlanWithScipy:
         """Indexing x0 with returned indices should match sample_plan output."""
         sampler = MaskedOTPlanSampler()
         j = sampler.sample_plan_with_scipy(x0_3d, x1_3d, full_mask)
-        x0_via_idx = x0_3d[j]
-        x0_via_plan, _ = sampler.sample_plan(x0_3d, x1_3d, full_mask)
-        torch.testing.assert_close(x0_via_idx, x0_via_plan)
+        x1_via_idx = x1_3d[j]
+        _, x1_via_plan = sampler.sample_plan(x0_3d, x1_3d, full_mask)
+        torch.testing.assert_close(x1_via_idx, x1_via_plan)
 
     def test_indexing_preserves_shape(
         self,
@@ -278,7 +270,7 @@ class TestMaskedSamplePlanWithScipy:
         """x0[j] should preserve original [B, N, 3] shape."""
         sampler = MaskedOTPlanSampler()
         j = sampler.sample_plan_with_scipy(x0_3d, x1_3d, full_mask)
-        assert x0_3d[j].shape == x0_3d.shape
+        assert x1_3d[j].shape == x1_3d.shape
 
     def test_masking_affects_indices(self) -> None:
         """Different masks should produce different index permutations."""

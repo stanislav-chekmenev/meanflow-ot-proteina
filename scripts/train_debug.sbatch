@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=mf_debug
 #SBATCH --partition=h100
-#SBATCH --qos=debug
+#SBATCH --qos=normal
 #SBATCH --gres=gpu:h100nvl:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=40G
-#SBATCH --time=0-01:00:00
+#SBATCH --time=0-06:00:00
 #SBATCH --output=logs/train_debug_%j.out
 #SBATCH --error=logs/train_debug_%j.err
 
@@ -75,19 +75,37 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
 export NCCL_SHM_DISABLE=0
 
+# --- Configurable Hydra overrides ---
+# Experiment config (training_ca_debug.yaml)
+EXP_NAME="meanflow-ot-bs16"
+ACCUMULATE_GRAD_BATCHES=1
+EVAL_EVERY_N_STEPS=100
+OT_COUPLING_ENABLED=False
+MEANFLOW_NORM_P=1.0
+NCPUS_PER_TASK_TRAIN=16
+NCPUS_PER_TASK_PREPRO=8
+
+# Dataset config (pdb_debug.yaml)
+DATAMODULE_REPEAT=16
+DATAMODULE_BATCH_SIZE=16
+
 # --- Run training ---
-# MeanFlow debug: 1 protein (1UBQ, 76 residues), 1 GPU, no wandb/checkpointing.
-#
-# Reference: CIFAR10 MeanFlow v1 uses torchrun with:
-#   --ratio 0.75  --P_mean_t -0.6  --P_std_t 1.6
-#   --P_mean_r -4.0  --P_std_r 1.6  --norm_p 0.75
-# Current proteina config uses shared P_mean/P_std for t and r.
-# The values can be tuned in training_ca_debug.yaml.
 echo "Starting MeanFlow debug training..."
 srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
     --config_name training_ca_debug \
     --single \
-    --show_prog_bar
+    --show_prog_bar \
+    --exp_overrides \
+        run_name_=$EXP_NAME \
+        opt.accumulate_grad_batches=$ACCUMULATE_GRAD_BATCHES \
+        eval.every_n_steps=$EVAL_EVERY_N_STEPS \
+        training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
+        training.meanflow.norm_p=$MEANFLOW_NORM_P \
+        hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
+        hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
+    --data_overrides \
+        datamodule.repeat=$DATAMODULE_REPEAT \
+        datamodule.batch_size=$DATAMODULE_BATCH_SIZE
 
 echo "==========================================="
 echo "Job completed: $(date)"
