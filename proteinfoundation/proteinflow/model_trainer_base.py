@@ -222,7 +222,7 @@ class ModelTrainerBase(L.LightningModule):
                 f"Sampling mode for t {self.cfg_exp.loss.t_distribution.name} not implemented"
             )
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx, *, val_step=False):
         """
         MeanFlow training step. Learns average velocity u(z_t, r, t) using JVP.
 
@@ -231,11 +231,12 @@ class ModelTrainerBase(L.LightningModule):
 
         Args:
             batch: Data batch.
+            val_step: If True, logs under "validation_loss" prefix and skips
+                scaling stats. Set by validation_step_data.
 
         Returns:
             Training loss averaged over batches.
         """
-        val_step = batch_idx == -1
         log_prefix = "validation_loss" if val_step else "train"
 
         assert not self.motif_conditioning, (
@@ -436,11 +437,11 @@ class ModelTrainerBase(L.LightningModule):
         norm_eps = self.meanflow_norm_eps
         adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
         loss_per_sample = loss_per_sample / adp_wt
-        train_loss = loss_per_sample.mean()
+        adaptive_loss = loss_per_sample.mean()
 
         self.log(
-            f"{log_prefix}/loss",
-            train_loss,
+            f"{log_prefix}/adaptive_loss",
+            adaptive_loss,
             on_step=True,
             on_epoch=True,
             prog_bar=False,
@@ -452,7 +453,7 @@ class ModelTrainerBase(L.LightningModule):
 
         if not val_step:
             self.log(
-                f"train_loss",
+                f"raw_loss",
                 raw_loss,
                 on_step=True,
                 on_epoch=True,
@@ -488,7 +489,7 @@ class ModelTrainerBase(L.LightningModule):
                 sync_dist=True,
             )
 
-        return train_loss
+        return adaptive_loss
 
     def compute_fm_loss(
         self, x_1, x_1_pred, x_t, t: Float[Tensor, "*"], mask: Bool[Tensor, "* nres"], **kwargs
@@ -550,10 +551,9 @@ class ModelTrainerBase(L.LightningModule):
     def validation_step_data(self, batch, batch_idx):
         """
         Evaluates the training loss, without auxiliary loss nor logging.
-        This is done with the function `training_step` with batch_idx -1.
         """
         with torch.no_grad():
-            loss = self.training_step(batch, batch_idx=-1)
+            loss = self.training_step(batch, batch_idx, val_step=True)
             self.validation_output_data.append(loss.item())
 
     def on_validation_epoch_end(self):

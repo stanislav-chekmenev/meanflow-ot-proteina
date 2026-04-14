@@ -9,7 +9,8 @@ datamodule:
   transforms:
     - _target_: "proteinfoundation.datasets.transforms.GlobalRotationTransform"
     - _target_: "proteinfoundation.datasets.transforms.ChainBreakPerResidueTransform"
-  batch_size: 1
+  repeat: 32
+  batch_size: 32
   num_workers: 0
   pin_memory: False
 
