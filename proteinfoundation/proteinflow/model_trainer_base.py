@@ -222,6 +222,15 @@ class ModelTrainerBase(L.LightningModule):
                 f"Sampling mode for t {self.cfg_exp.loss.t_distribution.name} not implemented"
             )
 
+    # Adaptive weighting (MeanFlow paper Eq. 22)
+    def adaptive_loss(self, loss):
+        norm_p = self.cfg_exp.training.meanflow.get("norm_p", None)
+        norm_eps = self.cfg_exp.training.meanflow.get("norm_eps", None)
+        if norm_p is None or norm_eps is None:
+            return loss.mean()
+        adp_wt = (loss.detach() + norm_eps) ** norm_p
+        return (loss / adp_wt).mean()
+
     def training_step(self, batch, batch_idx, *, val_step=False):
         """
         MeanFlow training step. Learns average velocity u(z_t, r, t) using JVP.
@@ -267,8 +276,8 @@ class ModelTrainerBase(L.LightningModule):
 
         # OT coupling: re-pair noise with data
         if self.ot_sampler is not None:
-            ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_0, x_1, mask)
-            x_0 = x_0[ot_noise_idx]
+            ot_clean_idx = self.ot_sampler.sample_plan_with_scipy(x_0, x_1, mask)
+            x_1 = x_1[ot_clean_idx]
 
         # --- PAPER CONVENTION: z_t = (1-t)*data + t*noise ---
         # x_0 = noise, x_1 = data (Proteina naming)
@@ -304,144 +313,65 @@ class ModelTrainerBase(L.LightningModule):
             if "cath_code" in batch:
                 batch.pop("cath_code")
 
-        # Split batch: JVP only needed when r < t (MeanFlow samples)
-        mf_mask_1d = (t - r).abs() > 1e-7  # [B], True = MeanFlow, False = standard FM
-        n_mf = mf_mask_1d.sum().item()
         B = t.shape[0]
 
-        if n_mf == 0:
-            # All samples are standard FM — skip JVP entirely
+        # Compute u(z_t, r, t) and dudt using JVP
+        def u_func(z_in, t_in, r_in):
+            h = (t_in - r_in).squeeze(-1).squeeze(-1)
+            t_flat = t_in.squeeze(-1).squeeze(-1)
             batch_nn = {
-                "x_t": z,
-                "t": t,
-                "h": torch.zeros_like(t),
+                "x_t": z_in,
+                "t": t_flat,
+                "h": h,
                 "mask": mask,
             }
             if "cath_code" in batch:
-                batch_nn["cath_code"] = batch["cath_code"]
-            u_pred = self.nn(batch_nn)["coors_pred"]
-            u_tgt = v.detach()
+                batch_nn["cath_code"] = [batch["cath_code"][i] for i in range(B)]
+            nn_out = self.nn(batch_nn)
+            return nn_out["coors_pred"]
 
-            u_pred = self.fm._mask_and_zero_com(u_pred, mask)
-            u_tgt = self.fm._mask_and_zero_com(u_tgt, mask)
+        dtdt_mf = torch.ones_like(t_ext)
+        drdt_mf = torch.zeros_like(r_ext)
 
-            error = (u_pred - u_tgt) * mask[..., None]
-            nres = mask.sum(dim=-1) * 3
-            loss_per_sample = (error ** 2).sum(dim=(-1, -2)) / nres
+        with torch.amp.autocast(self.device.type, enabled=False):
+            u_pred_mf, dudt_mf = torch.func.jvp(
+                u_func, (z, t_ext, r_ext), (v, dtdt_mf, drdt_mf)
+            )
 
-        elif n_mf == B:
-            # All samples are MeanFlow — JVP on full batch
-            def u_func(z_in, t_in, r_in):
-                h = (t_in - r_in).squeeze(-1).squeeze(-1)
-                t_flat = t_in.squeeze(-1).squeeze(-1)
-                batch_nn = {
-                    "x_t": z_in,
-                    "t": t_flat,
-                    "h": h,
-                    "mask": mask,
-                }
-                if "cath_code" in batch:
-                    batch_nn["cath_code"] = batch["cath_code"]
-                nn_out = self.nn(batch_nn)
-                return nn_out["coors_pred"]
+        u_tgt = (v - (t_ext - r_ext) * dudt_mf).detach()
 
-            dtdt = torch.ones_like(t_ext)
-            drdt = torch.zeros_like(r_ext)
+        u_pred = self.fm._mask_and_zero_com(u_pred_mf, mask)
+        u_tgt = self.fm._mask_and_zero_com(u_tgt, mask)
 
-            with torch.amp.autocast(self.device.type, enabled=False):
-                u_pred, dudt = torch.func.jvp(u_func, (z, t_ext, r_ext), (v, dtdt, drdt))
-
-            u_tgt = (v - (t_ext - r_ext) * dudt).detach()
-
-            u_pred = self.fm._mask_and_zero_com(u_pred, mask)
-            u_tgt = self.fm._mask_and_zero_com(u_tgt, mask)
-
-            error = (u_pred - u_tgt) * mask[..., None]
-            nres = mask.sum(dim=-1) * 3
-            loss_per_sample = (error ** 2).sum(dim=(-1, -2)) / nres
-
-        else:
-            # Mixed batch: split FM and MeanFlow subsets
-            fm_idx = torch.where(~mf_mask_1d)[0]
-            mf_idx = torch.where(mf_mask_1d)[0]
-
-            loss_per_sample = torch.zeros(B, device=self.device, dtype=z.dtype)
-
-            # -- FM subset: plain forward, no JVP --
-            z_fm = z[fm_idx]
-            v_fm = v[fm_idx]
-            t_fm = t[fm_idx]
-            mask_fm = mask[fm_idx]
-
-            batch_nn_fm = {
-                "x_t": z_fm,
-                "t": t_fm,
-                "h": torch.zeros_like(t_fm),
-                "mask": mask_fm,
-            }
-            if "cath_code" in batch:
-                batch_nn_fm["cath_code"] = [batch["cath_code"][i] for i in fm_idx.tolist()]
-            u_pred_fm = self.nn(batch_nn_fm)["coors_pred"]
-            u_tgt_fm = v_fm.detach()
-
-            u_pred_fm = self.fm._mask_and_zero_com(u_pred_fm, mask_fm)
-            u_tgt_fm = self.fm._mask_and_zero_com(u_tgt_fm, mask_fm)
-
-            error_fm = (u_pred_fm - u_tgt_fm) * mask_fm[..., None]
-            nres_fm = mask_fm.sum(dim=-1) * 3
-            loss_per_sample[fm_idx] = (error_fm ** 2).sum(dim=(-1, -2)) / nres_fm
-
-            # -- MeanFlow subset: JVP --
-            z_mf = z[mf_idx]
-            v_mf = v[mf_idx]
-            t_ext_mf = t_ext[mf_idx]
-            r_ext_mf = r_ext[mf_idx]
-            mask_mf = mask[mf_idx]
-
-            def u_func_mf(z_in, t_in, r_in):
-                h = (t_in - r_in).squeeze(-1).squeeze(-1)
-                t_flat = t_in.squeeze(-1).squeeze(-1)
-                batch_nn = {
-                    "x_t": z_in,
-                    "t": t_flat,
-                    "h": h,
-                    "mask": mask_mf,
-                }
-                if "cath_code" in batch:
-                    batch_nn["cath_code"] = [batch["cath_code"][i] for i in mf_idx.tolist()]
-                nn_out = self.nn(batch_nn)
-                return nn_out["coors_pred"]
-
-            dtdt_mf = torch.ones_like(t_ext_mf)
-            drdt_mf = torch.zeros_like(r_ext_mf)
-
-            with torch.amp.autocast(self.device.type, enabled=False):
-                u_pred_mf, dudt_mf = torch.func.jvp(
-                    u_func_mf, (z_mf, t_ext_mf, r_ext_mf), (v_mf, dtdt_mf, drdt_mf)
-                )
-
-            u_tgt_mf = (v_mf - (t_ext_mf - r_ext_mf) * dudt_mf).detach()
-
-            u_pred_mf = self.fm._mask_and_zero_com(u_pred_mf, mask_mf)
-            u_tgt_mf = self.fm._mask_and_zero_com(u_tgt_mf, mask_mf)
-
-            error_mf = (u_pred_mf - u_tgt_mf) * mask_mf[..., None]
-            nres_mf = mask_mf.sum(dim=-1) * 3
-            loss_per_sample[mf_idx] = (error_mf ** 2).sum(dim=(-1, -2)) / nres_mf
+        error = (u_pred - u_tgt) * mask[..., None]
+        nres = mask.sum(dim=-1) * 3
+        loss_mf = (error ** 2).sum(dim=(-1, -2)) / nres
 
         # Log raw loss before adaptive weighting
-        raw_loss = loss_per_sample.mean()
+        raw_loss_mf = loss_mf.mean()
 
-        # Adaptive weighting (paper Eq. 22)
-        norm_p = self.meanflow_norm_p
-        norm_eps = self.meanflow_norm_eps
-        adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
-        loss_per_sample = loss_per_sample / adp_wt
-        adaptive_loss = loss_per_sample.mean()
+        # Compute adaptive MF loss
+        loss_mf = self.adaptive_loss(loss_mf)
+
+        # Compute the FM loss separately
+        mf_ratio = self.cfg_exp.training.meanflow.ratio
+
+        # Compute FM loss
+        v_pred = u_func(z, t, t)
+        v_pred = self.fm._mask_and_zero_com(v_pred, mask)
+        loss_fm = (v_pred - v) ** 2 * mask[..., None]
+        loss_fm = loss_fm.sum(dim=(-1, -2)) / nres
+        raw_loss_fm = loss_fm.mean()
+
+        # Compute adaptive FM loss
+        loss_fm = self.adaptive_loss(loss_fm)
+
+        # Compute combined loss
+        combined_adp_loss = (1 - mf_ratio) * loss_fm + mf_ratio * loss_mf
 
         self.log(
-            f"{log_prefix}/adaptive_loss",
-            adaptive_loss,
+            f"{log_prefix}/combined_adaptive_loss",
+            combined_adp_loss,
             on_step=True,
             on_epoch=True,
             prog_bar=False,
@@ -450,11 +380,21 @@ class ModelTrainerBase(L.LightningModule):
             sync_dist=True,
             add_dataloader_idx=False,
         )
-
         if not val_step:
             self.log(
-                f"raw_loss",
-                raw_loss,
+                f"{log_prefix}/raw_loss_mf",
+                raw_loss_mf,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                f"{log_prefix}/raw_loss_fm",
+                raw_loss_fm,
                 on_step=True,
                 on_epoch=True,
                 prog_bar=True,
@@ -489,7 +429,7 @@ class ModelTrainerBase(L.LightningModule):
                 sync_dist=True,
             )
 
-        return adaptive_loss
+        return combined_adp_loss 
 
     def compute_fm_loss(
         self, x_1, x_1_pred, x_t, t: Float[Tensor, "*"], mask: Bool[Tensor, "* nres"], **kwargs

@@ -52,7 +52,6 @@ class ProteinEvalCallback(Callback):
         # is active (on_train_batch_end fires per micro-batch).
         self._last_eval_step = -1
         self._gt_logged = False
-        self._metric_defined = False
 
         # Per-run tmp directory so parallel runs don't overwrite each other.
         project_tmp = os.path.normpath(_PROJECT_TMP_DIR)
@@ -95,15 +94,6 @@ class ProteinEvalCallback(Callback):
         gt_path = os.path.join(self._tmp_dir, "ground_truth_ca.pdb")
         write_prot_to_pdb(atom37, gt_path, overwrite=True, no_indexing=True)
         return gt_path
-
-    # ------------------------------------------------------------------
-    def _ensure_wandb_metric(self, trainer):
-        """Define a custom WandB x-axis for eval/* metrics so they are not
-        rejected by the monotonic-step constraint of ``wandb.log(step=...)``."""
-        if self._metric_defined:
-            return
-        trainer.logger.experiment.define_metric("eval/*", step_metric="eval/global_step")
-        self._metric_defined = True
 
     # ------------------------------------------------------------------
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
@@ -151,23 +141,20 @@ class ProteinEvalCallback(Callback):
                 no_indexing=True,
             )
 
-            # --- Build the log payload --------------------------------------
-            self._ensure_wandb_metric(trainer)
+            # --- Log to WandB -----------------------------------------------
+            # Use commit=False so this data is merged into Lightning's next
+            # log call, which carries the correct trainer/global_step.
             log_dict = {
-                "eval/global_step": step,
                 "eval/generated_protein": wandb.Molecule(tmp_path),
             }
 
-            # Include ground truth in the same log call (first eval step only).
             if not self._gt_logged:
                 gt_path = self._prepare_gt_pdb()
                 if gt_path:
                     log_dict["eval/ground_truth_protein"] = wandb.Molecule(gt_path)
                 self._gt_logged = True
 
-            # commit=False so this call doesn't inflate WandB's internal step
-            # counter — Lightning handles the commit for each training step.
-            trainer.logger.experiment.log(log_dict, commit=False)
+            pl_module.logger.experiment.log(log_dict, commit=False)
 
         except Exception as e:
             logger.warning(f"ProteinEvalCallback failed at step {step}: {e}")

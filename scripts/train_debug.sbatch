@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=mf_debug
-#SBATCH --partition=h100
+#SBATCH --partition=gpu
 #SBATCH --qos=normal
-#SBATCH --gres=gpu:h100nvl:1
+#SBATCH --gres=gpu:rtx6000:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=40G
-#SBATCH --time=0-06:00:00
+#SBATCH --time=0-02:00:00
 #SBATCH --output=logs/train_debug_%j.out
 #SBATCH --error=logs/train_debug_%j.err
 
@@ -77,17 +77,17 @@ export NCCL_SHM_DISABLE=0
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca_debug.yaml)
-EXP_NAME="meanflow-ot-bs16"
-ACCUMULATE_GRAD_BATCHES=1
+EXP_NAME="meanflow-ot-bs2"
+ACCUMULATE_GRAD_BATCHES=16
 EVAL_EVERY_N_STEPS=100
-OT_COUPLING_ENABLED=False
+OT_COUPLING_ENABLED=True
 MEANFLOW_NORM_P=1.0
-NCPUS_PER_TASK_TRAIN=16
-NCPUS_PER_TASK_PREPRO=8
+NCPUS_PER_TASK_TRAIN=2
+NCPUS_PER_TASK_PREPRO=2
 
 # Dataset config (pdb_debug.yaml)
-DATAMODULE_REPEAT=16
-DATAMODULE_BATCH_SIZE=16
+DATAMODULE_REPEAT=2
+DATAMODULE_BATCH_SIZE=2
 
 # --- Run training ---
 echo "Starting MeanFlow debug training..."

@@ -84,4 +84,4 @@ eval:
   enabled: true
   every_n_steps: 1
   n_residues: 76
-  ground_truth_pdb: ${oc.env:DATA_PATH}/debug/raw/1ubq.pdb
+  ground_truth_pdb: ${oc.env:DATA_PATH}/debug/raw/1ubq.cif
