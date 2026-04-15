@@ -247,96 +247,47 @@ class ModelTrainerBase(L.LightningModule):
         adp_wt = (loss.detach() + norm_eps) ** norm_p
         return (loss / adp_wt).mean()
 
-    def training_step(self, batch, batch_idx, *, val_step=False):
+    def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B):
         """
-        MeanFlow training step. Learns average velocity u(z_t, r, t) using JVP.
+        Runs one noise sample through the MeanFlow + FM loss pipeline.
 
-        PAPER CONVENTION: z_t = (1-t)*data + t*noise. Data at t=0, noise at t=1.
-        Proteina convention: x_0=noise, x_1=data. We map between them explicitly.
+        Samples x_0, applies OT coupling if enabled, interpolates, computes
+        JVP (MeanFlow loss) and FM loss, and applies adaptive weighting.
 
         Args:
-            batch: Data batch.
-            val_step: If True, logs under "validation_loss" prefix and skips
-                scaling stats. Set by validation_step_data.
+            x_1: [B, n, 3] clean data, already COM-zeroed.
+            mask: [B, n] bool residue mask.
+            t_ext: [B, 1, 1] noise-side time (extended).
+            r_ext: [B, 1, 1] data-side time (extended).
+            t: [B] noise-side time (flat, needed for FM loss).
+            batch: original batch dict (needed for cath_code).
+            B: int batch size.
 
         Returns:
-            Training loss averaged over batches.
+            combined_adp_loss: scalar tensor (requires_grad=True)
+            raw_loss_mf: scalar tensor (detached mean, for logging)
+            raw_loss_fm: scalar tensor (detached mean, for logging)
         """
-        log_prefix = "validation_loss" if val_step else "train"
+        n = x_1.shape[-2]
+        dtype = x_1.dtype
+        batch_shape = x_1.shape[:-2]  # (B,)
 
-        assert not self.motif_conditioning, (
-            "Motif conditioning is not yet supported with MeanFlow training. "
-            "Set training.motif_conditioning=False in your config."
+        # 1. Sample noise
+        x_0 = self.fm.sample_reference(
+            n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
         )
+        # 2. Standard square-batch OT (when noise_samples pool is NOT active)
+        if self.ot_sampler is not None:
+            ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_1, x_0, mask)
+            x_0 = x_0[ot_noise_idx]
 
-        # Extract inputs and handle OT coupling
-        ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
-        noise_samples = ot_cfg.get("noise_samples", None)
-
-        if noise_samples is not None and self.ot_sampler is not None:
-            # Square OT pool: build large pool on CPU, select B pairs
-            x_1, x_0, mask, batch_shape, n, dtype = self._build_ot_pool(batch)
-        else:
-            # Standard path: extract from batch, sample noise
-            x_1, mask, batch_shape, n, dtype = self.extract_clean_sample(batch)
-            x_1 = self.fm._mask_and_zero_com(x_1, mask)
-            x_0 = self.fm.sample_reference(
-                n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
-            )
-            # Square-batch OT coupling (when enabled without noise_samples)
-            if self.ot_sampler is not None:
-                ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(
-                    x_1, x_0, mask
-                )
-                x_0 = x_0[ot_noise_idx]
-
-        # Sample (t, r) -- PAPER CONVENTION: t is noise-side, r is data-side, t >= r
-        t, r = self.fm.sample_two_timesteps(
-            batch_shape, self.device,
-            ratio=self.meanflow_ratio,
-            P_mean_t=self.meanflow_P_mean_t,
-            P_std_t=self.meanflow_P_std_t,
-            P_mean_r=self.meanflow_P_mean_r,
-            P_std_r=self.meanflow_P_std_r,
-        )
-
-        # --- PAPER CONVENTION: z_t = (1-t)*data + t*noise ---
-        # x_0 = noise, x_1 = data (Proteina naming)
-        t_ext = t[..., None, None]   # [B, 1, 1]
-        r_ext = r[..., None, None]   # [B, 1, 1]
-        z = (1 - t_ext) * x_1 + t_ext * x_0   # (1-t)*data + t*noise
-        v = x_0 - x_1                           # noise - data (conditional velocity)
+        # 3. Interpolate: z_t = (1-t)*x_1 + t*x_0 (paper convention)
+        z = (1 - t_ext) * x_1 + t_ext * x_0
+        v = x_0 - x_1
         z = self.fm._apply_mask(z, mask)
         v = self.fm._apply_mask(v, mask)
 
-        # Fold conditional training
-        if self.cfg_exp.training.fold_cond:
-            bs = x_1.shape[0]
-            cath_code_list = batch.cath_code
-            for i in range(bs):
-                cath_code_list[i] = mask_cath_code_by_level(
-                    cath_code_list[i], level="H"
-                )
-                if random.random() < self.cfg_exp.training.mask_T_prob:
-                    cath_code_list[i] = mask_cath_code_by_level(
-                        cath_code_list[i], level="T"
-                    )
-                    if random.random() < self.cfg_exp.training.mask_A_prob:
-                        cath_code_list[i] = mask_cath_code_by_level(
-                            cath_code_list[i], level="A"
-                        )
-                        if random.random() < self.cfg_exp.training.mask_C_prob:
-                            cath_code_list[i] = mask_cath_code_by_level(
-                                cath_code_list[i], level="C"
-                            )
-            batch.cath_code = cath_code_list
-        else:
-            if "cath_code" in batch:
-                batch.pop("cath_code")
-
-        B = t.shape[0]
-
-        # Compute u(z_t, r, t) and dudt using JVP
+        # 4. JVP for MeanFlow loss
         def u_func(z_in, t_in, r_in):
             h = (t_in - r_in).squeeze(-1).squeeze(-1)
             t_flat = t_in.squeeze(-1).squeeze(-1)
@@ -364,93 +315,238 @@ class ModelTrainerBase(L.LightningModule):
         u_pred = self.fm._mask_and_zero_com(u_pred_mf, mask)
         u_tgt = self.fm._mask_and_zero_com(u_tgt, mask)
 
-        error = (u_pred - u_tgt) * mask[..., None]
         nres = mask.sum(dim=-1) * 3
+        error = (u_pred - u_tgt) * mask[..., None]
         loss_mf = (error ** 2).sum(dim=(-1, -2)) / nres
-
-        # Log raw loss before adaptive weighting
-        raw_loss_mf = loss_mf.mean()
-
-        # Compute adaptive MF loss
+        raw_loss_mf = loss_mf.mean().detach()
         loss_mf = self.adaptive_loss(loss_mf)
 
-        # Compute the FM loss separately
+        # 5. FM loss
         mf_ratio = self.cfg_exp.training.meanflow.ratio
-
-        # Compute FM loss
         v_pred = u_func(z, t, t)
         v_pred = self.fm._mask_and_zero_com(v_pred, mask)
         loss_fm = (v_pred - v) ** 2 * mask[..., None]
         loss_fm = loss_fm.sum(dim=(-1, -2)) / nres
-        raw_loss_fm = loss_fm.mean()
-
-        # Compute adaptive FM loss
+        raw_loss_fm = loss_fm.mean().detach()
         loss_fm = self.adaptive_loss(loss_fm)
 
-        # Compute combined loss
+        # 6. Combined
         combined_adp_loss = (1 - mf_ratio) * loss_fm + mf_ratio * loss_mf
+        return combined_adp_loss, raw_loss_mf, raw_loss_fm
 
-        self.log(
-            f"{log_prefix}/combined_adaptive_loss",
-            combined_adp_loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            batch_size=mask.shape[0],
-            sync_dist=True,
-            add_dataloader_idx=False,
+    def training_step(self, batch, batch_idx, *, val_step=False):
+        """
+        MeanFlow training step. Learns average velocity u(z_t, r, t) using JVP.
+
+        PAPER CONVENTION: z_t = (1-t)*data + t*noise. Data at t=0, noise at t=1.
+        Proteina convention: x_0=noise, x_1=data. We map between them explicitly.
+
+        Args:
+            batch: Data batch.
+            val_step: If True, logs under "validation_loss" prefix and skips
+                scaling stats. Validation always uses K=1 (single noise sample).
+
+        Returns:
+            Training loss (scalar) for K=1/automatic optimization, or None for K>1/manual.
+        """
+        log_prefix = "validation_loss" if val_step else "train"
+
+        assert not self.motif_conditioning, (
+            "Motif conditioning is not yet supported with MeanFlow training. "
+            "Set training.motif_conditioning=False in your config."
         )
-        if not val_step:
+
+        # --- 1. Shared setup: extract x_1, mask, sample (t, r), fold conditioning ---
+        ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
+        noise_samples = ot_cfg.get("noise_samples", None)
+
+        if noise_samples is not None and self.ot_sampler is not None:
+            # OT pool: _build_ot_pool determines which proteins to train on.
+            # x_0 from the pool is discarded; each noise pass in the K loop
+            # samples fresh x_0 and runs standard OT against the fixed x_1.
+            x_1, _x_0_pool, mask, batch_shape, n, dtype = self._build_ot_pool(batch)
+        else:
+            x_1, mask, batch_shape, n, dtype = self.extract_clean_sample(batch)
+            x_1 = self.fm._mask_and_zero_com(x_1, mask)
+
+        # Sample (t, r) -- shared across all K noise passes
+        t, r = self.fm.sample_two_timesteps(
+            batch_shape, self.device,
+            ratio=self.meanflow_ratio,
+            P_mean_t=self.meanflow_P_mean_t,
+            P_std_t=self.meanflow_P_std_t,
+            P_mean_r=self.meanflow_P_mean_r,
+            P_std_r=self.meanflow_P_std_r,
+        )
+        t_ext = t[..., None, None]   # [B, 1, 1]
+        r_ext = r[..., None, None]   # [B, 1, 1]
+
+        B = t.shape[0]
+
+        # Fold conditioning -- shared, mutates batch in-place
+        if self.cfg_exp.training.fold_cond:
+            bs = x_1.shape[0]
+            cath_code_list = batch.cath_code
+            for i in range(bs):
+                cath_code_list[i] = mask_cath_code_by_level(
+                    cath_code_list[i], level="H"
+                )
+                if random.random() < self.cfg_exp.training.mask_T_prob:
+                    cath_code_list[i] = mask_cath_code_by_level(
+                        cath_code_list[i], level="T"
+                    )
+                    if random.random() < self.cfg_exp.training.mask_A_prob:
+                        cath_code_list[i] = mask_cath_code_by_level(
+                            cath_code_list[i], level="A"
+                        )
+                        if random.random() < self.cfg_exp.training.mask_C_prob:
+                            cath_code_list[i] = mask_cath_code_by_level(
+                                cath_code_list[i], level="C"
+                            )
+            batch.cath_code = cath_code_list
+        else:
+            if "cath_code" in batch:
+                batch.pop("cath_code")
+
+        # --- 2. Determine K ---
+        # Validation always uses a single noise sample regardless of config.
+        K = 1 if val_step else self.loss_accumulation_steps
+
+        # --- 3. K=1 path (automatic optimization, identical to pre-refactor behavior) ---
+        if K == 1:
+            combined_adp_loss, raw_loss_mf, raw_loss_fm = self._compute_single_noise_loss(
+                x_1, mask, t_ext, r_ext, t, batch, B
+            )
+
             self.log(
-                f"{log_prefix}/raw_loss_mf",
-                raw_loss_mf,
+                f"{log_prefix}/combined_adaptive_loss",
+                combined_adp_loss,
                 on_step=True,
                 on_epoch=True,
-                prog_bar=True,
+                prog_bar=False,
                 logger=True,
                 batch_size=mask.shape[0],
                 sync_dist=True,
                 add_dataloader_idx=False,
             )
-            self.log(
-                f"{log_prefix}/raw_loss_fm",
-                raw_loss_fm,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                batch_size=mask.shape[0],
-                sync_dist=True,
-                add_dataloader_idx=False,
-            )
+            if not val_step:
+                self.log(
+                    f"{log_prefix}/raw_loss_mf",
+                    raw_loss_mf,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    batch_size=mask.shape[0],
+                    sync_dist=True,
+                    add_dataloader_idx=False,
+                )
+                self.log(
+                    f"{log_prefix}/raw_loss_fm",
+                    raw_loss_fm,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    batch_size=mask.shape[0],
+                    sync_dist=True,
+                    add_dataloader_idx=False,
+                )
 
-            b, n = mask.shape
-            self.nsamples_processed = (
-                self.nsamples_processed + b * self.trainer.world_size
-            )
-            self.log(
-                "scaling/nsamples_processed",
-                self.nsamples_processed * 1.0,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                logger=True,
-                batch_size=1,
-                sync_dist=True,
-            )
-            self.log(
-                "scaling/nparams",
-                self.nparams * 1.0,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                logger=True,
-                batch_size=1,
-                sync_dist=True,
-            )
+                b, n = mask.shape
+                self.nsamples_processed = (
+                    self.nsamples_processed + b * self.trainer.world_size
+                )
+                self.log(
+                    "scaling/nsamples_processed",
+                    self.nsamples_processed * 1.0,
+                    on_step=True,
+                    on_epoch=False,
+                    prog_bar=False,
+                    logger=True,
+                    batch_size=1,
+                    sync_dist=True,
+                )
+                self.log(
+                    "scaling/nparams",
+                    self.nparams * 1.0,
+                    on_step=True,
+                    on_epoch=False,
+                    prog_bar=False,
+                    logger=True,
+                    batch_size=1,
+                    sync_dist=True,
+                )
 
-        return combined_adp_loss 
+            return combined_adp_loss
+
+        # --- 4. K>1 path (manual optimization) ---
+        optimizer = self.optimizers()
+
+        total_loss_mf = 0.0
+        total_loss_fm = 0.0
+
+        for k in range(K):
+            loss_k, raw_loss_mf_k, raw_loss_fm_k = self._compute_single_noise_loss(
+                x_1, mask, t_ext, r_ext, t, batch, B
+            )
+            # Backward with 1/K scaling so accumulated gradient == mean gradient
+            self.manual_backward(loss_k / K)
+            total_loss_mf += raw_loss_mf_k.item()
+            total_loss_fm += raw_loss_fm_k.item()
+
+        avg_loss_mf = total_loss_mf / K
+        avg_loss_fm = total_loss_fm / K
+        mf_ratio = self.cfg_exp.training.meanflow.ratio
+        avg_combined = (1 - mf_ratio) * avg_loss_fm + mf_ratio * avg_loss_mf
+
+        # Log averaged metrics
+        self.log(
+            f"{log_prefix}/combined_adaptive_loss", avg_combined,
+            on_step=True, on_epoch=True, prog_bar=False, logger=True,
+            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+        )
+        self.log(
+            f"{log_prefix}/raw_loss_mf", avg_loss_mf,
+            on_step=True, on_epoch=True, prog_bar=True, logger=True,
+            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+        )
+        self.log(
+            f"{log_prefix}/raw_loss_fm", avg_loss_fm,
+            on_step=True, on_epoch=True, prog_bar=True, logger=True,
+            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+        )
+        self.log(
+            f"{log_prefix}/loss_accumulation_steps", float(K),
+            on_step=True, on_epoch=False, prog_bar=False, logger=True,
+            batch_size=1, sync_dist=False, add_dataloader_idx=False,
+        )
+
+        b, _n = mask.shape
+        self.nsamples_processed = self.nsamples_processed + b * self.trainer.world_size
+        self.log(
+            "scaling/nsamples_processed", self.nsamples_processed * 1.0,
+            on_step=True, on_epoch=False, prog_bar=False, logger=True,
+            batch_size=1, sync_dist=True,
+        )
+        self.log(
+            "scaling/nparams", self.nparams * 1.0,
+            on_step=True, on_epoch=False, prog_bar=False, logger=True,
+            batch_size=1, sync_dist=True,
+        )
+
+        # --- 5. Manual optimizer step (respects _accum_grad_batches) ---
+        self._manual_step_count += 1
+        if self._manual_step_count % self._accum_grad_batches == 0:
+            self.clip_gradients(optimizer, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+            optimizer.step()
+            optimizer.zero_grad()
+            # Step LR scheduler if present
+            sch = self.lr_schedulers()
+            if sch is not None:
+                sch.step()
+
+        return None  # manual optimization: Lightning doesn't need a loss value
 
     def compute_fm_loss(
         self, x_1, x_1_pred, x_t, t: Float[Tensor, "*"], mask: Bool[Tensor, "* nres"], **kwargs
