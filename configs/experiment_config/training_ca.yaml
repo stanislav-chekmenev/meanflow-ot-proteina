@@ -36,6 +36,7 @@ dataset_config_subdir: pdb
 force_precision_f32: False  # If false will use bf16-mixed precision
 
 training:
+  loss_accumulation_steps: 1
   self_cond: False  # Unused in MeanFlow training
   fold_cond: False
   mask_T_prob: 0.5

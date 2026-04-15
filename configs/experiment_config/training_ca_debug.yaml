@@ -30,6 +30,7 @@ dataset_config_subdir: pdb
 
 force_precision_f32: False
 training:
+  loss_accumulation_steps: 1
   self_cond: False
   fold_cond: False
   mask_T_prob: 0.5

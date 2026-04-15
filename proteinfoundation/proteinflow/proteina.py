@@ -76,6 +76,16 @@ class Proteina(ModelTrainerBase):
                 normalize_cost=ot_cfg.get("normalize_cost", False),
             )
 
+        # Loss accumulation
+        K = cfg_exp.training.get("loss_accumulation_steps", 1)
+        self.loss_accumulation_steps = K
+        if K > 1:
+            # Manual optimization: Lightning won't call optimizer.step() for us.
+            # We reimplement accumulate_grad_batches manually below.
+            self.automatic_optimization = False
+        self._accum_grad_batches = cfg_exp.opt.get("accumulate_grad_batches", 1)
+        self._manual_step_count = 0
+
         if self.motif_conditioning:
             self.motif_conditioning_sequence_rep = cfg_exp.training.get("motif_conditioning_sequence_rep", False)
             if self.motif_conditioning_sequence_rep:
