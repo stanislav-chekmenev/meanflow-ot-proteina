@@ -278,3 +278,50 @@ def test_ot_coupling_called_k_times():
     assert len(call_count) == 2, (
         f"Expected OT sampler called 2 times (K=2), got {len(call_count)}"
     )
+
+
+def test_gradient_magnitude_consistent_across_k():
+    """
+    Gradient norms for K=4 should be in the same ballpark as K=1 (averaging,
+    not summing). If gradients were summed, the K=4 norm would be ~4x larger.
+    """
+    batch = _build_batch(4, 16)
+
+    # K=1: training_step returns a loss tensor; call backward manually.
+    torch.manual_seed(42)
+    model_k1 = _build_model(K=1)
+    torch.manual_seed(42)
+    loss_k1 = model_k1.training_step(batch, batch_idx=0)
+    assert loss_k1 is not None, "K=1 should return a loss tensor"
+    loss_k1.backward()
+
+    grad_norm_k1 = torch.sqrt(
+        sum(p.grad.pow(2).sum() for p in model_k1.nn.parameters() if p.grad is not None)
+    )
+
+    # K=4: training_step returns None; gradients are accumulated internally via
+    # manual_backward(loss_k / K), so they should already be averaged.
+    torch.manual_seed(42)
+    model_k4 = _build_model(K=4, accum=4)
+    torch.manual_seed(42)
+    result_k4 = model_k4.training_step(batch, batch_idx=0)
+    assert result_k4 is None, "K=4 should return None (manual optimization)"
+
+    grad_norm_k4 = torch.sqrt(
+        sum(p.grad.pow(2).sum() for p in model_k4.nn.parameters() if p.grad is not None)
+    )
+
+    assert grad_norm_k1 > 0, f"K=1 gradient norm should be > 0, got {grad_norm_k1}"
+    assert grad_norm_k4 > 0, f"K=4 gradient norm should be > 0, got {grad_norm_k4}"
+
+    # Averaging: K=4 norm should NOT be ~4x the K=1 norm.
+    assert grad_norm_k4 < 2 * grad_norm_k1, (
+        f"K=4 gradient norm ({grad_norm_k4:.4f}) is more than 2x the K=1 norm "
+        f"({grad_norm_k1:.4f}), suggesting gradients are being summed rather than averaged"
+    )
+
+    # Sanity: norms should not differ by more than 10x in either direction.
+    assert grad_norm_k4 > 0.1 * grad_norm_k1, (
+        f"K=4 gradient norm ({grad_norm_k4:.4f}) is less than 0.1x the K=1 norm "
+        f"({grad_norm_k1:.4f}), which is unexpectedly small"
+    )
