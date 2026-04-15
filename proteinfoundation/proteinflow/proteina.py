@@ -123,6 +123,143 @@ class Proteina(ModelTrainerBase):
 
         create_dir(self.val_path_tmp)
 
+    def on_train_start(self):
+        """Store reference to training dataset for OT pool sampling."""
+        ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
+        noise_samples = ot_cfg.get("noise_samples", None)
+        if noise_samples is not None and self.ot_sampler is not None:
+            dm = self.trainer.datamodule
+            if dm.train_ds is None:
+                dm.setup("fit")
+            self._ot_dataset = dm.train_ds
+            assert noise_samples >= self.trainer.datamodule.batch_size, (
+                f"noise_samples ({noise_samples}) must be >= batch_size "
+                f"({self.trainer.datamodule.batch_size})"
+            )
+
+    def _build_ot_pool(self, batch):
+        """Build a square OT pool on CPU and return B selected pairs on GPU.
+
+        Samples extra proteins from the training dataset to build a pool of
+        `noise_samples` data/noise pairs, computes square OT assignment via
+        Hungarian algorithm, then randomly selects B pairs for training.
+
+        Args:
+            batch: Dataloader batch (used to extract the initial B proteins).
+
+        Returns:
+            Tuple (x_1, x_0, mask, batch_shape, n, dtype) with B selected
+            pairs on self.device (GPU).
+        """
+        import scipy.optimize
+        from proteinfoundation.utils.dense_padding_data_loader import (
+            dense_padded_from_data_list,
+        )
+
+        ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
+        K = ot_cfg["noise_samples"]  # total pool size
+
+        # --- 1. Extract clean data from the dataloader batch (on CPU) ---
+        x_1_batch, mask_batch, batch_shape_orig, n_batch, dtype = (
+            self.extract_clean_sample(batch)
+        )
+        x_1_batch = self.fm._mask_and_zero_com(x_1_batch, mask_batch)
+        B = batch_shape_orig[0]
+
+        # Ensure tensors are on CPU for OT computation
+        x_1_batch = x_1_batch.detach().cpu()
+        mask_batch = mask_batch.cpu()
+
+        # --- 2. Sample extra proteins to fill the pool ---
+        n_extra = K - B
+
+        if n_extra > 0:
+            extra_indices = torch.randint(0, len(self._ot_dataset), (n_extra,))
+            extra_data_list = [self._ot_dataset[int(idx)] for idx in extra_indices]
+            extra_batch = dense_padded_from_data_list(extra_data_list)
+
+            # Process extra proteins identically to the main batch
+            x_1_extra, mask_extra, _, _, _ = self.extract_clean_sample(extra_batch)
+            x_1_extra = self.fm._mask_and_zero_com(x_1_extra, mask_extra)
+            x_1_extra = x_1_extra.detach().cpu()
+            mask_extra = mask_extra.cpu()
+
+            # --- 3. Pad both to the same sequence length ---
+            N_batch = x_1_batch.shape[1]
+            N_extra = x_1_extra.shape[1]
+            N_pool = max(N_batch, N_extra)
+
+            if N_batch < N_pool:
+                pad_size = N_pool - N_batch
+                x_1_batch = torch.cat(
+                    [x_1_batch, torch.zeros(B, pad_size, 3, dtype=dtype)], dim=1
+                )
+                mask_batch = torch.cat(
+                    [mask_batch, torch.zeros(B, pad_size, dtype=torch.bool)], dim=1
+                )
+
+            if N_extra < N_pool:
+                pad_size = N_pool - N_extra
+                x_1_extra = torch.cat(
+                    [x_1_extra, torch.zeros(n_extra, pad_size, 3, dtype=dtype)],
+                    dim=1,
+                )
+                mask_extra = torch.cat(
+                    [mask_extra, torch.zeros(n_extra, pad_size, dtype=torch.bool)],
+                    dim=1,
+                )
+
+            x_1_pool = torch.cat([x_1_batch, x_1_extra], dim=0)  # [K, N_pool, 3]
+            mask_pool = torch.cat([mask_batch, mask_extra], dim=0)  # [K, N_pool]
+        else:
+            # K == B: no extra samples needed
+            x_1_pool = x_1_batch
+            mask_pool = mask_batch
+            N_pool = x_1_batch.shape[1]
+
+        # --- 4. Sample noise on CPU ---
+        x_0_pool = (
+            torch.randn(K, N_pool, self.fm.dim, dtype=dtype) * self.fm.scale_ref
+        )
+        x_0_pool = self.fm._mask_and_zero_com(x_0_pool, mask_pool)
+
+        # --- 5. Build cost matrix [K, K] ---
+        mask_3d = mask_pool[..., None]  # [K, N_pool, 1] bool
+        x_1_flat = (x_1_pool * mask_3d).reshape(K, -1)  # [K, N_pool*3]
+        x_0_flat = (x_0_pool * mask_3d).reshape(K, -1)  # [K, N_pool*3]
+        M = torch.cdist(x_1_flat, x_0_flat) ** 2  # [K, K]
+
+        # --- 6. Hungarian algorithm for optimal assignment ---
+        _, sigma = scipy.optimize.linear_sum_assignment(M.numpy())
+
+        # --- 7. Randomly select B pairs from the OT plan ---
+        sel = torch.randperm(K)[:B].numpy()
+        x_1_sel = x_1_pool[sel]  # [B, N_pool, 3]
+        x_0_sel = x_0_pool[sigma[sel]]  # [B, N_pool, 3]
+        mask_sel = mask_pool[sel]  # [B, N_pool]
+
+        # --- 8. Trim to max actual length of selected proteins ---
+        max_len = int(mask_sel.sum(dim=1).max().item())
+        if max_len == 0:
+            max_len = N_pool  # safety fallback
+        x_1_sel = x_1_sel[:, :max_len, :]
+        x_0_sel = x_0_sel[:, :max_len, :]
+        mask_sel = mask_sel[:, :max_len]
+
+        # Re-apply mask and zero COM after trimming
+        x_1_sel = self.fm._mask_and_zero_com(x_1_sel, mask_sel)
+        x_0_sel = self.fm._mask_and_zero_com(x_0_sel, mask_sel)
+
+        # --- 9. Move to GPU ---
+        x_1_out = x_1_sel.to(device=self.device)
+        x_0_out = x_0_sel.to(device=self.device)
+        mask_out = mask_sel.to(device=self.device)
+
+        # Clean up large CPU tensors
+        del x_1_pool, x_0_pool, mask_pool, M, x_1_flat, x_0_flat
+
+        return x_1_out, x_0_out, mask_out, torch.Size([B]), max_len, dtype
+
     def align_wrapper(self, x_0, x_1, mask):
         """Performs Kabsch on the translation component of x_0 and x_1."""
         return kabsch_align(mobile=x_0, target=x_1, mask=mask)
