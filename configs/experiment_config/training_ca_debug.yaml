@@ -42,6 +42,7 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
+    noise_samples: 128
   meanflow:
     # Current proteina defaults.
     # For reference, CIFAR10 MeanFlow v1 uses: ratio=0.75, P_mean_t=-0.6,
@@ -57,6 +58,8 @@ training:
 
 opt:
   lr: 0.0001
+  warmup_steps: 100  # Number of linear warmup steps (0 = no warmup)
+  lr_decay_total_steps: 3000  # Total steps for warmup + linear decay schedule (0 = constant LR)
   max_epochs: 3000            # Short debug run
   log_every_n_steps: 1
   accumulate_grad_batches: 1

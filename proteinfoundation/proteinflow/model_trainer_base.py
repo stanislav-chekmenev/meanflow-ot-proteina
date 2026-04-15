@@ -17,6 +17,8 @@ from abc import abstractmethod
 from functools import partial
 from typing import Dict, List, Literal
 
+import scipy.optimize
+
 import lightning as L
 import numpy as np
 import torch
@@ -56,6 +58,22 @@ class ModelTrainerBase(L.LightningModule):
         optimizer = torch.optim.Adam(
             [p for p in self.parameters() if p.requires_grad], lr=self.cfg_exp.opt.lr
         )
+
+        warmup_steps = self.cfg_exp.opt.get("warmup_steps", 0)
+        total_steps = self.cfg_exp.opt.get("lr_decay_total_steps", 0)
+
+        if total_steps > 0:
+            def lr_lambda(current_step):
+                if current_step < warmup_steps:
+                    return current_step / max(1, warmup_steps)
+                return max(0.0, (total_steps - current_step) / max(1, total_steps - warmup_steps))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
+            }
+
         return optimizer
 
     def _nn_out_to_x_clean(self, nn_out, batch):
@@ -270,14 +288,42 @@ class ModelTrainerBase(L.LightningModule):
         )
 
         # Sample noise (x_0 in Proteina convention = noise)
-        x_0 = self.fm.sample_reference(
-            n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
-        )
+        ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
+        noise_samples = ot_cfg.get("noise_samples", None)
 
-        # OT coupling: re-pair noise with data
-        if self.ot_sampler is not None:
-            ot_clean_idx = self.ot_sampler.sample_plan_with_scipy(x_0, x_1, mask)
-            x_1 = x_1[ot_clean_idx]
+        if noise_samples is not None and self.ot_sampler is not None:
+            # Oversample noise on CPU (avoids GPU OOM), use OT to select best coupling.
+            # OT (scipy) runs on CPU anyway — only the selected B samples move to GPU.
+            B = batch_shape[0]
+            K = noise_samples
+
+            x_0_all = torch.randn(
+                B * K, n, self.fm.dim, dtype=dtype
+            ) * self.fm.scale_ref  # [B*K, N, 3] on CPU
+
+            # Rectangular cost matrix M[i,j] = ||data_i - noise_j||^2 (per-sample mask)
+            x_1_cpu = x_1.detach().cpu()
+            mask_cpu = mask.cpu()
+            M = torch.empty(B, B * K)
+            for i in range(B):
+                m = mask_cpu[i, :, None]                       # [N, 1]
+                d = (x_1_cpu[i] * m).reshape(1, -1)            # [1, N*3]
+                ns = (x_0_all * m).reshape(B * K, -1)          # [B*K, N*3]
+                M[i] = ((d - ns) ** 2).sum(dim=-1)
+
+            _, j = scipy.optimize.linear_sum_assignment(M.numpy())
+
+            x_0 = x_0_all[j].to(device=self.device)
+            del x_0_all, M, x_1_cpu, mask_cpu
+            x_0 = self.fm._mask_and_zero_com(x_0, mask)
+        else:
+            x_0 = self.fm.sample_reference(
+                n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
+            )
+            # OT coupling: re-pair noise with data (square case)
+            if self.ot_sampler is not None:
+                ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_1, x_0, mask)
+                x_0 = x_0[ot_noise_idx]
 
         # --- PAPER CONVENTION: z_t = (1-t)*data + t*noise ---
         # x_0 = noise, x_1 = data (Proteina naming)

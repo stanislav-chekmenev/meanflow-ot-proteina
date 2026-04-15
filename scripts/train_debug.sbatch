@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=40G
-#SBATCH --time=0-02:00:00
+#SBATCH --time=0-04:00:00
 #SBATCH --output=logs/train_debug_%j.out
 #SBATCH --error=logs/train_debug_%j.err
 
@@ -77,13 +77,16 @@ export NCCL_SHM_DISABLE=0
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca_debug.yaml)
-EXP_NAME="meanflow-ot-bs2"
-ACCUMULATE_GRAD_BATCHES=16
+EXP_NAME="meanflow-base-bs2" # osn = oversampled noise
+ACCUMULATE_GRAD_BATCHES=128
 EVAL_EVERY_N_STEPS=100
-OT_COUPLING_ENABLED=True
+OT_COUPLING_ENABLED=False
 MEANFLOW_NORM_P=1.0
 NCPUS_PER_TASK_TRAIN=2
 NCPUS_PER_TASK_PREPRO=2
+NOISE_SAMPLES=128
+MAX_EPOCHS=20000
+
 
 # Dataset config (pdb_debug.yaml)
 DATAMODULE_REPEAT=2
@@ -98,10 +101,12 @@ srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
     --exp_overrides \
         run_name_=$EXP_NAME \
         opt.accumulate_grad_batches=$ACCUMULATE_GRAD_BATCHES \
+        opt.max_epochs=$MAX_EPOCHS \
         eval.every_n_steps=$EVAL_EVERY_N_STEPS \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
+        training.ot_coupling.noise_samples=$NOISE_SAMPLES \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
     --data_overrides \
         datamodule.repeat=$DATAMODULE_REPEAT \
