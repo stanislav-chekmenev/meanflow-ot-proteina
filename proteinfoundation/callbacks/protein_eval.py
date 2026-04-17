@@ -18,6 +18,7 @@ from Bio.PDB import MMCIFParser, PDBParser
 from lightning.pytorch.callbacks import Callback
 from loguru import logger
 
+from proteinfoundation.utils.coors_utils import ang_to_nm
 from proteinfoundation.utils.ema_utils.ema_callback import EMAOptimizer
 from proteinfoundation.utils.ff_utils.pdb_utils import write_prot_to_pdb
 
@@ -199,6 +200,7 @@ class ProteinEvalCallback(Callback):
         dtype = torch.float32
 
         x_1 = torch.from_numpy(gt_ca).to(device=device, dtype=dtype).unsqueeze(0)  # [1, n, 3]
+        x_1 = ang_to_nm(x_1)  # model works in nm; GT PDB is in Å
         n = x_1.shape[1]
         mask = torch.ones(1, n, dtype=torch.bool, device=device)
         x_1 = fm._mask_and_zero_com(x_1, mask)
@@ -209,7 +211,7 @@ class ProteinEvalCallback(Callback):
         x_1_mirror = x_1 @ Q  # Q is symmetric, so x @ Q == (Q @ x^T)^T
 
         # Deterministic noise + times so the two losses are directly comparable.
-        gen = torch.Generator(device=device).manual_seed(20260417)
+        gen = torch.Generator(device=device).manual_seed(42)
         ts = torch.empty(n_noise_samples, device=device, dtype=dtype).uniform_(
             0.05, 0.9, generator=gen
         )
