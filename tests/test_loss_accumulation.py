@@ -184,13 +184,14 @@ def test_compute_single_noise_loss_finite():
     t_ext = t[..., None, None]
     r_ext = r[..., None, None]
 
-    loss, raw_mf, raw_fm = model._compute_single_noise_loss(
+    loss, raw_mf, raw_fm, raw_chir = model._compute_single_noise_loss(
         x_1, mask, t_ext, r_ext, t, batch, B
     )
 
     assert torch.isfinite(loss), f"combined loss not finite: {loss}"
     assert torch.isfinite(raw_mf), f"raw_loss_mf not finite: {raw_mf}"
     assert torch.isfinite(raw_fm), f"raw_loss_fm not finite: {raw_fm}"
+    assert torch.isfinite(raw_chir), f"raw_loss_chir not finite: {raw_chir}"
     assert loss.requires_grad, "combined loss should require grad"
 
 
