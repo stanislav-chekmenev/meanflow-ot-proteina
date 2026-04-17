@@ -32,6 +32,7 @@ force_precision_f32: False
 training:
   loss_accumulation_steps: 1
   self_cond: False
+  self_cond_prob: 0.5
   fold_cond: False
   mask_T_prob: 0.5
   mask_A_prob: 0.5
@@ -56,6 +57,11 @@ training:
     norm_p: 1.0
     norm_eps: 0.001
     nsteps_sample: 1
+  chirality_loss:
+    enabled: False
+    weight: 1.0
+    margin_alpha: 0.1
+    stride: 1
 
 opt:
   lr: 0.0001
