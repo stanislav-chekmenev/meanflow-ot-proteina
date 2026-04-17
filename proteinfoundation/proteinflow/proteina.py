@@ -116,11 +116,15 @@ class Proteina(ModelTrainerBase):
                 "use_aux_loss=True has no effect in MeanFlow training.",
                 UserWarning, stacklevel=2,
             )
-        if cfg_exp.training.get("self_cond", False):
-            warnings.warn(
-                "self_cond=True has no effect in MeanFlow training.",
-                UserWarning, stacklevel=2,
-            )
+        # Self-conditioning (opt-in, wired through _compute_single_noise_loss).
+        self.self_cond_prob = cfg_exp.training.get("self_cond_prob", 0.5)
+
+        # Chirality hinge loss (opt-in).
+        chir_cfg = cfg_exp.training.get("chirality_loss", {})
+        self.chirality_loss_enabled = chir_cfg.get("enabled", False)
+        self.chirality_loss_weight = chir_cfg.get("weight", 1.0)
+        self.chirality_margin_alpha = chir_cfg.get("margin_alpha", 0.1)
+        self.chirality_stride = chir_cfg.get("stride", 1)
 
         # Neural network
         # JVP incompatible with torch.utils.checkpoint (used in PairReprUpdate)

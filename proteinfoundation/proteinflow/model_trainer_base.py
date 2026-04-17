@@ -25,6 +25,7 @@ from loguru import logger
 from torch import Tensor
 
 from proteinfoundation.utils.ff_utils.pdb_utils import mask_cath_code_by_level
+from proteinfoundation.proteinflow.chirality_loss import chirality_hinge_loss
 
 
 class ModelTrainerBase(L.LightningModule):
@@ -274,6 +275,7 @@ class ModelTrainerBase(L.LightningModule):
             combined_adp_loss: scalar tensor (requires_grad=True)
             raw_loss_mf: scalar tensor (detached mean, for logging)
             raw_loss_fm: scalar tensor (detached mean, for logging)
+            raw_loss_chir: scalar tensor (detached, for logging; zero when disabled)
         """
         n = x_1.shape[-2]
         dtype = x_1.dtype
@@ -339,7 +341,25 @@ class ModelTrainerBase(L.LightningModule):
 
         # 6. Combined
         combined_adp_loss = (1 - mf_ratio) * loss_fm + mf_ratio * loss_mf
-        return combined_adp_loss, raw_loss_mf, raw_loss_fm
+
+        # 7. Chirality hinge loss (optional)
+        raw_loss_chir = torch.zeros((), device=self.device)
+        if getattr(self, "chirality_loss_enabled", False) and self.chirality_loss_weight > 0:
+            # Recover x_1 prediction from the FM sub-pass velocity:
+            # z = (1-t)*x_1 + t*x_0  =>  x_1 ≈ z - t * v  (at r=t).
+            x_1_pred = z - t_ext * v_pred
+            x_1_pred = self.fm._mask_and_zero_com(x_1_pred, mask)
+            loss_chir = chirality_hinge_loss(
+                x_pred=x_1_pred,
+                x_gt=x_1,
+                mask=mask,
+                margin_alpha=self.chirality_margin_alpha,
+                stride=self.chirality_stride,
+            )
+            raw_loss_chir = loss_chir.detach()
+            combined_adp_loss = combined_adp_loss + self.chirality_loss_weight * loss_chir
+
+        return combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir
 
     def training_step(self, batch, batch_idx, *, val_step=False):
         """
@@ -421,7 +441,7 @@ class ModelTrainerBase(L.LightningModule):
 
         # --- 3. K=1 path (automatic optimization, identical to pre-refactor behavior) ---
         if K == 1:
-            combined_adp_loss, raw_loss_mf, raw_loss_fm = self._compute_single_noise_loss(
+            combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B
             )
 
@@ -454,6 +474,17 @@ class ModelTrainerBase(L.LightningModule):
                     on_step=True,
                     on_epoch=True,
                     prog_bar=True,
+                    logger=True,
+                    batch_size=mask.shape[0],
+                    sync_dist=True,
+                    add_dataloader_idx=False,
+                )
+                self.log(
+                    f"{log_prefix}/raw_loss_chirality",
+                    raw_loss_chir,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=False,
                     logger=True,
                     batch_size=mask.shape[0],
                     sync_dist=True,
@@ -492,18 +523,21 @@ class ModelTrainerBase(L.LightningModule):
 
         total_loss_mf = 0.0
         total_loss_fm = 0.0
+        total_loss_chir = 0.0
 
         for _ in range(K):
-            loss_k, raw_loss_mf_k, raw_loss_fm_k = self._compute_single_noise_loss(
+            loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_loss_chir_k = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B
             )
             # Backward with 1/K scaling so accumulated gradient == mean gradient
             self.manual_backward(loss_k / K)
             total_loss_mf += raw_loss_mf_k.item()
             total_loss_fm += raw_loss_fm_k.item()
+            total_loss_chir += raw_loss_chir_k.item()
 
         avg_loss_mf = total_loss_mf / K
         avg_loss_fm = total_loss_fm / K
+        avg_loss_chir = total_loss_chir / K
         mf_ratio = self.cfg_exp.training.meanflow.ratio
         avg_combined = (1 - mf_ratio) * avg_loss_fm + mf_ratio * avg_loss_mf
 
@@ -521,6 +555,11 @@ class ModelTrainerBase(L.LightningModule):
         self.log(
             f"{log_prefix}/raw_loss_fm", avg_loss_fm,
             on_step=True, on_epoch=True, prog_bar=True, logger=True,
+            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+        )
+        self.log(
+            f"{log_prefix}/raw_loss_chirality", avg_loss_chir,
+            on_step=True, on_epoch=True, prog_bar=False, logger=True,
             batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
         )
         self.log(
