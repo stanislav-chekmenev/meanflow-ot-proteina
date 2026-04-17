@@ -5,8 +5,8 @@
 #SBATCH --gres=gpu:rtx6000:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=40G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
 #SBATCH --time=0-04:00:00
 #SBATCH --output=logs/train_debug_%j.out
 #SBATCH --error=logs/train_debug_%j.err
@@ -77,16 +77,21 @@ export NCCL_SHM_DISABLE=0
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca_debug.yaml)
-EXP_NAME="meanflow-base-bs2" # osn = oversampled noise
-ACCUMULATE_GRAD_BATCHES=128
-EVAL_EVERY_N_STEPS=100
-OT_COUPLING_ENABLED=True
-MEANFLOW_NORM_P=1.0
-NCPUS_PER_TASK_TRAIN=2
+EXP_NAME="meanflow-base-p1-bs2" 
+ACCUMULATE_GRAD_BATCHES=10
+EVAL_EVERY_N_STEPS=250
+OT_COUPLING_ENABLED=False
+MEANFLOW_NORM_P=1
+NCPUS_PER_TASK_TRAIN=16
 NCPUS_PER_TASK_PREPRO=2
-NOISE_SAMPLES=128
+NOISE_SAMPLES=0
+LOSS_ACCUMULATION_STEPS=64
 MAX_EPOCHS=20000
-
+WARMUP_STEPS=1000
+LR_DECAY_TOTAL_STEPS=23000
+INIT_LR=1e-6
+END_LR=5e-6
+LR=2.5e-5
 
 # Dataset config (pdb_debug.yaml)
 DATAMODULE_REPEAT=2
@@ -100,13 +105,19 @@ srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
     --show_prog_bar \
     --exp_overrides \
         run_name_=$EXP_NAME \
+        opt.lr=$LR \
         opt.accumulate_grad_batches=$ACCUMULATE_GRAD_BATCHES \
         opt.max_epochs=$MAX_EPOCHS \
+        opt.warmup_steps=$WARMUP_STEPS \
+        opt.lr_decay_total_steps=$LR_DECAY_TOTAL_STEPS \
+        opt.init_lr=$INIT_LR \
+        opt.end_lr=$END_LR \
         eval.every_n_steps=$EVAL_EVERY_N_STEPS \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
         training.ot_coupling.noise_samples=$NOISE_SAMPLES \
+        training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
     --data_overrides \
         datamodule.repeat=$DATAMODULE_REPEAT \

@@ -59,12 +59,19 @@ class ModelTrainerBase(L.LightningModule):
 
         warmup_steps = self.cfg_exp.opt.get("warmup_steps", 0)
         total_steps = self.cfg_exp.opt.get("lr_decay_total_steps", 0)
+        end_lr = self.cfg_exp.opt.get("end_lr", 0.0)
+        init_lr = self.cfg_exp.opt.get("init_lr", 0.0)
+        base_lr = self.cfg_exp.opt.lr
 
         if total_steps > 0:
+            min_factor = end_lr / base_lr if base_lr > 0 else 0.0
+            init_factor = init_lr / base_lr if base_lr > 0 else 0.0
+
             def lr_lambda(current_step):
                 if current_step < warmup_steps:
-                    return current_step / max(1, warmup_steps)
-                return max(0.0, (total_steps - current_step) / max(1, total_steps - warmup_steps))
+                    return init_factor + (1.0 - init_factor) * current_step / max(1, warmup_steps)
+                linear = (total_steps - current_step) / max(1, total_steps - warmup_steps)
+                return max(min_factor, linear)
 
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
             return {
@@ -243,9 +250,9 @@ class ModelTrainerBase(L.LightningModule):
         norm_p = self.cfg_exp.training.meanflow.get("norm_p", None)
         norm_eps = self.cfg_exp.training.meanflow.get("norm_eps", None)
         if norm_p is None or norm_eps is None:
-            return loss.mean()
+            return loss
         adp_wt = (loss.detach() + norm_eps) ** norm_p
-        return (loss / adp_wt).mean()
+        return (loss / adp_wt)
 
     def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B):
         """
@@ -318,8 +325,8 @@ class ModelTrainerBase(L.LightningModule):
         nres = mask.sum(dim=-1) * 3
         error = (u_pred - u_tgt) * mask[..., None]
         loss_mf = (error ** 2).sum(dim=(-1, -2)) / nres
-        raw_loss_mf = loss_mf.mean().detach()
-        loss_mf = self.adaptive_loss(loss_mf)
+        raw_loss_mf = loss_mf.mean().detach() # use for logging, before adaptive weighting
+        loss_mf = self.adaptive_loss(loss_mf).mean()
 
         # 5. FM loss
         mf_ratio = self.cfg_exp.training.meanflow.ratio
@@ -327,8 +334,8 @@ class ModelTrainerBase(L.LightningModule):
         v_pred = self.fm._mask_and_zero_com(v_pred, mask)
         loss_fm = (v_pred - v) ** 2 * mask[..., None]
         loss_fm = loss_fm.sum(dim=(-1, -2)) / nres
-        raw_loss_fm = loss_fm.mean().detach()
-        loss_fm = self.adaptive_loss(loss_fm)
+        raw_loss_fm = loss_fm.mean().detach() # use for logging, before adaptive weighting
+        loss_fm = self.adaptive_loss(loss_fm).mean()
 
         # 6. Combined
         combined_adp_loss = (1 - mf_ratio) * loss_fm + mf_ratio * loss_mf
@@ -486,7 +493,7 @@ class ModelTrainerBase(L.LightningModule):
         total_loss_mf = 0.0
         total_loss_fm = 0.0
 
-        for k in range(K):
+        for _ in range(K):
             loss_k, raw_loss_mf_k, raw_loss_fm_k = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B
             )
@@ -693,6 +700,48 @@ class ModelTrainerBase(L.LightningModule):
 
         return self.fm.meanflow_sample(
             predict_u, nsamples, n, self.device, mask, nsteps, dtype
+        )
+
+    def generate_fm_euler(
+        self,
+        nsamples: int,
+        n: int,
+        nsteps: int = 100,
+        dtype: torch.dtype = None,
+        mask=None,
+        cath_code=None,
+    ) -> Tensor:
+        """
+        Generates samples using standard FM-style Euler ODE integration.
+
+        Calls the network with h=0 (instantaneous velocity mode, i.e. r=t)
+        and integrates from t=1 (noise) to t=0 (data) using Euler steps.
+        This serves as a diagnostic to compare MeanFlow 1-step generation
+        against the standard flow matching ODE solver.
+
+        CONVENTION: z_t = (1-t)*data + t*noise. v(z_t,t) = dz/dt = noise - data.
+        Integration: z_{t-dt} = z_t - dt * v(z_t, t).
+        """
+        if mask is None:
+            mask = torch.ones(nsamples, n).long().bool().to(self.device)
+
+        def predict_v_instantaneous(z, t, _r, mask):
+            # Force h=0 so the network predicts instantaneous velocity v(z_t, t)
+            batch_nn = {
+                "x_t": z,
+                "t": t,
+                "h": torch.zeros_like(t),
+                "mask": mask,
+            }
+            if cath_code is not None:
+                batch_nn["cath_code"] = cath_code
+            nn_out = self.nn(batch_nn)
+            return nn_out["coors_pred"]
+
+        # Reuse meanflow_sample infrastructure: with h=0, multi-step Euler
+        # becomes standard FM ODE integration from t=1 to t=0.
+        return self.fm.meanflow_sample(
+            predict_v_instantaneous, nsamples, n, self.device, mask, nsteps, dtype
         )
 
 
