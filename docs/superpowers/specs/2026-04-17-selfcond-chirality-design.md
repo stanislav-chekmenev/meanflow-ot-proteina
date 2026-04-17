@@ -105,21 +105,22 @@ Vectorized: stack edges `→ [B, n-3k, 3, 3]`, apply `torch.linalg.det`.
 
 ### Margin
 
-Per batch, from GT `x_1`:
+Per-element from GT `x_1`:
 ```
-T_gt      = triple_products(x_1, stride=k)    # [B, n-3k]
-m_T_batch = alpha * (|T_gt| * valid).sum() / valid.sum()
+T_gt = triple_products(x_1, stride=k)    # [B, n-3k]
+m_T_i = alpha * |T_gt_i|                  # per-element margin
 ```
-`alpha` is configurable (default `0.1`). `m_T_batch` is a scalar, recomputed per step — cheap (one det per step on a small tensor) and adapts to batch content. In the single-protein debug run this is effectively constant across steps.
+`alpha` is configurable (default `0.1`). The margin scales with each triple's own magnitude, so flat regions (small `|T|`) get proportionally small penalties. This per-element form guarantees the loss is zero at identity (`pred == gt`) for any `alpha < 1`, which the original global-mean form did not.
 
 ### Loss
 
 ```
-signed_agreement = sign(T_gt) * T_pred    # positive if same handedness
-L_chir           = mean over valid i of relu(m_T_batch - signed_agreement_i)
+signed_agreement_i = sign(T_gt_i) * T_pred_i    # positive if same handedness
+hinge_i            = relu(alpha * |T_gt_i| - signed_agreement_i)
+L_chir             = sum(hinge_i * valid_i) / valid.sum()
 ```
 
-Zero when predictions match GT handedness with triple-product magnitude ≥ margin; positive and linear in shortfall otherwise.
+Zero when predictions match GT handedness with triple-product magnitude ≥ `alpha * |T_gt|`; linear in shortfall otherwise.
 
 ### Where `x_pred` comes from
 

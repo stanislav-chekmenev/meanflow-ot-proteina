@@ -5,8 +5,6 @@ sign under reflection, so it provides a handedness signal that the raw FM
 loss (which is O(3)-invariant on a single protein) lacks.
 """
 
-from typing import Optional
-
 import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
@@ -31,7 +29,8 @@ def triple_products(
     """
     k = stride
     n = x.shape[-2]
-    assert n > 3 * k, f"Need n > 3*stride; got n={n}, stride={k}"
+    if n <= 3 * k:
+        raise ValueError(f"Need n > 3*stride; got n={n}, stride={k}")
 
     # Edge vectors [B, n - 3k, 3]
     e1 = x[:, k : n - 2 * k] - x[:, : n - 3 * k]

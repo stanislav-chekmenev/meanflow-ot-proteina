@@ -79,25 +79,31 @@ def test_chirality_hinge_loss_positive_at_mirror(random_ca, full_mask):
 
 
 def test_chirality_hinge_loss_respects_mask(random_ca):
-    # First half valid, second half masked out.
+    # Use a mirrored prediction so the full-mask loss is non-zero.
+    Q = torch.diag(torch.tensor([1.0, 1.0, -1.0]))
+    x_mirror = random_ca @ Q
+
     mask = torch.zeros(random_ca.shape[:2], dtype=torch.bool)
-    mask[:, : random_ca.shape[1] // 2] = True
+    mask[:, : random_ca.shape[1] // 2] = True  # first half valid only
+
     loss_partial = chirality_hinge_loss(
-        x_pred=random_ca,
+        x_pred=x_mirror,
         x_gt=random_ca,
         mask=mask,
         margin_alpha=0.1,
         stride=1,
     )
     loss_full = chirality_hinge_loss(
-        x_pred=random_ca,
+        x_pred=x_mirror,
         x_gt=random_ca,
         mask=torch.ones_like(mask),
         margin_alpha=0.1,
         stride=1,
     )
-    assert loss_partial.item() == pytest.approx(0.0, abs=1e-6)
-    assert loss_full.item() == pytest.approx(0.0, abs=1e-6)
+    # Both non-zero, but partial < full because fewer residues contribute.
+    assert loss_full.item() > 0.0
+    assert loss_partial.item() > 0.0
+    assert loss_partial.item() < loss_full.item()
 
 
 def test_chirality_hinge_loss_gradient_flows():
