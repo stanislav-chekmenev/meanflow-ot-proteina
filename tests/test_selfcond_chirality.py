@@ -146,8 +146,10 @@ def _make_fake_trainer():
         def __init__(self):
             super().__init__()
             self.scale = torch.nn.Parameter(torch.tensor(1.0))
+            self.calls = []
 
         def forward(self, batch):
+            self.calls.append(dict(batch))
             # Return something proportional to x_t so it has grad w.r.t. scale.
             return {"coors_pred": self.scale * batch["x_t"]}
 
@@ -256,3 +258,43 @@ def test_chirality_loss_added_when_enabled():
     # Adding a positive hinge term with weight 10.0 strictly increases the
     # combined loss relative to the disabled run.
     assert loss_enabled.item() > loss_disabled.item()
+
+
+def test_self_cond_plumbing_warmup_and_injection():
+    trainer = _make_fake_trainer()
+    # Reset calls
+    trainer.nn.calls.clear()
+
+    B, n = 1, 12
+    x_1 = torch.randn(B, n, 3)
+    mask = torch.ones(B, n, dtype=torch.bool)
+    t = torch.full((B,), 0.5)
+    r = torch.full((B,), 0.3)
+    t_ext = t[..., None, None]
+    r_ext = r[..., None, None]
+    batch = {}
+
+    # use_sc=False: NN called exactly twice (JVP primal + FM sub-pass),
+    # neither call should contain x_sc.
+    loss, _, _, _ = trainer._compute_single_noise_loss(
+        x_1, mask, t_ext, r_ext, t, batch, B, use_sc=False,
+    )
+    n_calls_off = len(trainer.nn.calls)
+    assert n_calls_off == 2, f"use_sc=False expected 2 NN calls, got {n_calls_off}"
+    for c in trainer.nn.calls:
+        assert "x_sc" not in c
+
+    trainer.nn.calls.clear()
+
+    # use_sc=True: one extra warmup call; the JVP and FM calls must receive x_sc.
+    loss, _, _, _ = trainer._compute_single_noise_loss(
+        x_1, mask, t_ext, r_ext, t, batch, B, use_sc=True,
+    )
+    n_calls_on = len(trainer.nn.calls)
+    assert n_calls_on == 3, f"use_sc=True expected 3 NN calls (warmup + JVP + FM), got {n_calls_on}"
+    # First call is the warmup (no x_sc); subsequent calls must include x_sc.
+    assert "x_sc" not in trainer.nn.calls[0]
+    assert "x_sc" in trainer.nn.calls[1]
+    assert "x_sc" in trainer.nn.calls[2]
+    # x_sc must be detached.
+    assert not trainer.nn.calls[1]["x_sc"].requires_grad

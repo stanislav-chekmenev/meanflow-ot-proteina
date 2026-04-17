@@ -255,7 +255,7 @@ class ModelTrainerBase(L.LightningModule):
         adp_wt = (loss.detach() + norm_eps) ** norm_p
         return (loss / adp_wt)
 
-    def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B):
+    def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B, *, use_sc=False):
         """
         Runs one noise sample through the MeanFlow + FM loss pipeline.
 
@@ -270,6 +270,10 @@ class ModelTrainerBase(L.LightningModule):
             t: [B] noise-side time (flat, needed for FM loss).
             batch: original batch dict (needed for cath_code).
             B: int batch size.
+            use_sc: If True, run one extra no-grad forward pass to obtain
+                x_sc and feed it as a detached constant into the JVP and FM
+                sub-passes. Requires the NN config to declare x_sc /
+                x_sc_pair_dists in its feature lists.
 
         Returns:
             combined_adp_loss: scalar tensor (requires_grad=True)
@@ -296,6 +300,25 @@ class ModelTrainerBase(L.LightningModule):
         z = self.fm._apply_mask(z, mask)
         v = self.fm._apply_mask(v, mask)
 
+        # 3b. Self-conditioning warmup (no-grad, no tangent).
+        x_sc = None
+        if use_sc:
+            with torch.no_grad():
+                warmup_batch = {
+                    "x_t": z,
+                    "t": t_ext.squeeze(-1).squeeze(-1),
+                    "h": (t_ext - r_ext).squeeze(-1).squeeze(-1),
+                    "mask": mask,
+                }
+                if "cath_code" in batch:
+                    warmup_batch["cath_code"] = [batch["cath_code"][i] for i in range(B)]
+                u_warmup = self.nn(warmup_batch)["coors_pred"]
+                # Interpret u as avg velocity and recover a clean-coord proxy:
+                # x_1 ≈ z - t * u (exact at r=0, approximation elsewhere).
+                x_sc = z - t_ext * u_warmup
+                x_sc = self.fm._mask_and_zero_com(x_sc, mask)
+                x_sc = x_sc.detach()
+
         # 4. JVP for MeanFlow loss
         def u_func(z_in, t_in, r_in):
             h = (t_in - r_in).squeeze(-1).squeeze(-1)
@@ -306,6 +329,8 @@ class ModelTrainerBase(L.LightningModule):
                 "h": h,
                 "mask": mask,
             }
+            if x_sc is not None:
+                batch_nn["x_sc"] = x_sc  # detached, closed-over, no tangent
             if "cath_code" in batch:
                 batch_nn["cath_code"] = [batch["cath_code"][i] for i in range(B)]
             nn_out = self.nn(batch_nn)
@@ -410,6 +435,13 @@ class ModelTrainerBase(L.LightningModule):
 
         B = t.shape[0]
 
+        # --- 1b. Self-conditioning activation (per step, consistent across K passes) ---
+        use_sc = (
+            not val_step
+            and self.cfg_exp.training.get("self_cond", False)
+            and random.random() < self.self_cond_prob
+        )
+
         # Fold conditioning -- shared, mutates batch in-place
         if self.cfg_exp.training.fold_cond:
             bs = x_1.shape[0]
@@ -442,7 +474,7 @@ class ModelTrainerBase(L.LightningModule):
         # --- 3. K=1 path (automatic optimization, identical to pre-refactor behavior) ---
         if K == 1:
             combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir = self._compute_single_noise_loss(
-                x_1, mask, t_ext, r_ext, t, batch, B
+                x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
             )
 
             self.log(
@@ -527,7 +559,7 @@ class ModelTrainerBase(L.LightningModule):
 
         for _ in range(K):
             loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_loss_chir_k = self._compute_single_noise_loss(
-                x_1, mask, t_ext, r_ext, t, batch, B
+                x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
             )
             # Backward with 1/K scaling so accumulated gradient == mean gradient
             self.manual_backward(loss_k / K)
