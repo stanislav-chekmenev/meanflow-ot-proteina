@@ -93,6 +93,16 @@ INIT_LR=1e-6
 END_LR=5e-6
 LR=1.e-4
 
+# Self-conditioning
+SELF_COND=False
+SELF_COND_PROB=0.5
+
+# Chirality hinge loss
+CHIRALITY_ENABLED=False
+CHIRALITY_WEIGHT=1.0
+CHIRALITY_MARGIN_ALPHA=0.1
+CHIRALITY_STRIDE=1
+
 # Dataset config (pdb_debug.yaml)
 DATAMODULE_REPEAT=2
 DATAMODULE_BATCH_SIZE=2
@@ -119,6 +129,12 @@ srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
         training.ot_coupling.noise_samples=$NOISE_SAMPLES \
         training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
+        training.self_cond=$SELF_COND \
+        training.self_cond_prob=$SELF_COND_PROB \
+        training.chirality_loss.enabled=$CHIRALITY_ENABLED \
+        training.chirality_loss.weight=$CHIRALITY_WEIGHT \
+        training.chirality_loss.margin_alpha=$CHIRALITY_MARGIN_ALPHA \
+        training.chirality_loss.stride=$CHIRALITY_STRIDE \
     --data_overrides \
         datamodule.repeat=$DATAMODULE_REPEAT \
         datamodule.batch_size=$DATAMODULE_BATCH_SIZE
