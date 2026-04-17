@@ -130,7 +130,6 @@ def test_chirality_hinge_loss_gradient_flows():
 # Trainer plumbing tests
 # ----------------------------------------------------------------------------
 
-import unittest.mock as mock
 from omegaconf import OmegaConf
 
 
@@ -147,10 +146,8 @@ def _make_fake_trainer():
         def __init__(self):
             super().__init__()
             self.scale = torch.nn.Parameter(torch.tensor(1.0))
-            self.calls = []
 
         def forward(self, batch):
-            self.calls.append({k: v for k, v in batch.items()})
             # Return something proportional to x_t so it has grad w.r.t. scale.
             return {"coors_pred": self.scale * batch["x_t"]}
 
@@ -185,12 +182,20 @@ def _make_fake_trainer():
 
 
 def test_chirality_loss_added_when_enabled():
+    """The chirality branch must actually fire when enabled: given a
+    prediction whose implied x_1_pred is the mirror of x_1 (Q = diag(-1,1,1)),
+    the hinge loss is strictly positive and the combined loss must exceed
+    the disabled case (noise seeded identically in both runs).
+    """
     trainer = _make_fake_trainer()
-    trainer.chirality_loss_enabled = True
     trainer.chirality_loss_weight = 10.0
 
     B, n = 1, 12
+    torch.manual_seed(0)
     x_1 = torch.randn(B, n, 3)
+    # Zero COM so the trainer's mask_and_zero_com doesn't perturb our
+    # mirror construction through the FakeNN.
+    x_1 = x_1 - x_1.mean(dim=-2, keepdim=True)
     mask = torch.ones(B, n, dtype=torch.bool)
     t = torch.full((B,), 0.5)
     r = torch.full((B,), 0.3)
@@ -198,18 +203,56 @@ def test_chirality_loss_added_when_enabled():
     r_ext = r[..., None, None]
     batch = {}
 
-    loss_enabled, _, _, _ = trainer._compute_single_noise_loss(
+    # Replace the trainer's NN with one that, on the FM sub-pass (h=0, i.e.
+    # r=t), returns v_pred = (x_t - Q @ x_1) / t so that the recovered
+    # x_1_pred = x_t - t * v_pred equals Q @ x_1 (a mirrored copy). That
+    # drives signed_agreement = -T_gt^2 <= 0 everywhere, hence a strictly
+    # positive hinge loss with margin_alpha = 0.1.
+    Q = torch.diag(torch.tensor([-1.0, 1.0, 1.0]))
+    x_1_mirror = x_1 @ Q
+
+    class MirrorNN(torch.nn.Module):
+        def __init__(self, x_1_mirror, t_ext):
+            super().__init__()
+            # Trainable param so the module has grad, matching FakeNN.
+            self.scale = torch.nn.Parameter(torch.tensor(1.0))
+            self.register_buffer("x_1_mirror", x_1_mirror)
+            self.register_buffer("t_ext", t_ext)
+
+        def forward(self, batch):
+            x_t = batch["x_t"]
+            h = batch["h"]
+            # FM sub-pass uses h == 0 (r == t). Return v_pred so that
+            # x_1_pred = x_t - t * v_pred == Q @ x_1 exactly. Multiply by
+            # self.scale (which starts at 1.0) so backward still has grad.
+            if torch.allclose(h, torch.zeros_like(h)):
+                v_pred = (x_t - self.x_1_mirror) / self.t_ext
+                return {"coors_pred": self.scale * v_pred}
+            # MeanFlow sub-pass (h != 0): return something arbitrary but
+            # differentiable through the NN params.
+            return {"coors_pred": self.scale * x_t}
+
+    trainer.nn = MirrorNN(x_1_mirror, t_ext)
+
+    # --- Enabled run ---
+    trainer.chirality_loss_enabled = True
+    torch.manual_seed(0)
+    loss_enabled, _, _, raw_loss_chir = trainer._compute_single_noise_loss(
         x_1, mask, t_ext, r_ext, t, batch, B,
     )
 
+    # --- Disabled run (same NN, same seed => same noise sample) ---
     trainer.chirality_loss_enabled = False
-    loss_disabled, _, _, _ = trainer._compute_single_noise_loss(
+    torch.manual_seed(0)
+    loss_disabled, _, _, raw_loss_chir_off = trainer._compute_single_noise_loss(
         x_1, mask, t_ext, r_ext, t, batch, B,
     )
 
-    # Enabling chirality loss must not decrease the total loss value (same
-    # noise/mask/config otherwise). We use abs difference instead of strict >
-    # because for random init loss the chirality hinge may be zero if the
-    # fake NN happens to match GT handedness; rerun until we see variance.
     assert torch.isfinite(loss_enabled)
     assert torch.isfinite(loss_disabled)
+    # Chirality branch must fire when enabled and be zero when disabled.
+    assert raw_loss_chir.item() > 0.0
+    assert raw_loss_chir_off.item() == 0.0
+    # Adding a positive hinge term with weight 10.0 strictly increases the
+    # combined loss relative to the disabled run.
+    assert loss_enabled.item() > loss_disabled.item()

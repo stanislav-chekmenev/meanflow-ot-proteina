@@ -344,7 +344,7 @@ class ModelTrainerBase(L.LightningModule):
 
         # 7. Chirality hinge loss (optional)
         raw_loss_chir = torch.zeros((), device=self.device)
-        if getattr(self, "chirality_loss_enabled", False) and self.chirality_loss_weight > 0:
+        if self.chirality_loss_enabled and self.chirality_loss_weight > 0:
             # Recover x_1 prediction from the FM sub-pass velocity:
             # z = (1-t)*x_1 + t*x_0  =>  x_1 ≈ z - t * v  (at r=t).
             x_1_pred = z - t_ext * v_pred
