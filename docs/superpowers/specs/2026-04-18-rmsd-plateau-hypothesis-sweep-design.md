@@ -44,7 +44,7 @@ Main agents are stateless `Agent` dispatches; continuity across rounds comes fro
   - Responsibility: feasibility, codebase integration, test strategy, change localization.
   - Grounded in the file:line anchors from the memory file:
     - Adaptive loss: `proteinfoundation/proteinflow/model_trainer_base.py:252-259`
-    - Chirality branch & gate: `model_trainer_base.py:376-414` (gate at `:401`)
+    - Chirality branch: `model_trainer_base.py:370-387` (enable-guard at `:372`; no t-gate exists yet — any t-gating is a hypothesis-scope change)
     - LR scheduler: `model_trainer_base.py:59-86`
     - Chirality hinge math: `proteinfoundation/proteinflow/chirality_loss.py:36-42, 93-97`
     - Eval chirality: `proteinfoundation/callbacks/protein_eval.py:75-78, 269, 291`
@@ -102,19 +102,21 @@ Dedup notes: <if two pitches overlap, state which survives>
 ```
 
 Both main agents must independently APPROVE the same pitches. Discrepancy handling:
-- APPROVE + REVISE → subagent revises, re-pitches, architect + ML scientist re-rule on just that pitch.
+- APPROVE + REVISE → subagent revises, re-pitches, architect + ML scientist re-rule on just that pitch. **Cap: 1 revision round per pitch.** If still not APPROVE/APPROVE after revision, treat as tiebreaker case.
 - APPROVE + REJECT → orchestrator dispatches a **tiebreaker subagent** (`subagent_type: general-purpose`, model: opus) with both rulings, the pitch, and the memory file. Tiebreaker returns a ruling with stated rationale; orchestrator adopts it. No user intervention.
-- Both REJECT → subagent given one chance to propose a new hypothesis, then Round 1 restarts for that slot only.
+- REVISE + REVISE → orchestrator merges required changes (union of both) and re-dispatches subagent with combined revision list. Then re-rules.
+- REVISE + REJECT → treat as REJECT (tiebreaker).
+- Both REJECT → subagent given ONE chance to propose a new hypothesis; if the new pitch is also rejected by either main agent, tiebreaker decides whether to keep/drop the slot. **Max 1 restart per slot.**
 
 Target: exactly three approved, deduplicated hypotheses.
 
 ### Round 3 — Implement (parallel, one subagent per approved hypothesis)
 
-Orchestrator creates one worktree per approved hypothesis via the `Agent` tool's `isolation: "worktree"` parameter, which auto-branches off the current HEAD. Subagents work inside their own worktree and do not run `git checkout` themselves.
+Orchestrator pre-creates each branch on `main` (`git branch hyp/<slug> main`) and then dispatches an implementation subagent with `Agent` tool's `isolation: "worktree"` parameter pointing at that branch. The subagent inherits a worktree already on `hyp/<slug>`; no branch rename happens. Subagents do not run `git checkout` or `git branch` themselves.
 
-Each approved subagent (fresh dispatch, prompt includes approval + any revisions + worktree path) performs:
+Each approved subagent (fresh dispatch, prompt includes approval + any revisions + branch name) performs:
 
-1. Verify it is at worktree root and branch matches `hyp/<slug>`.
+1. Verify `git rev-parse --abbrev-ref HEAD` equals `hyp/<slug>` before any edits. If not, abort and report to orchestrator.
 2. Implement the change. Localized commits with descriptive messages. **No "Co-Authored-By" lines per user memory.**
 3. Write unit tests under `tests/`. Tests run with `PYTHONPATH=. pytest tests/<file> -v` per user memory.
 4. Run unit tests; iterate until green.
@@ -136,18 +138,17 @@ Terminal state: three branches on disk, each with commits + tests + sbatch + hyp
 
 ## Guardrails (mandatory on every branch)
 
-1. sbatch script sets `opt.accumulate_grad_batches=1` (removes the known no-op).
-2. sbatch script sets eval `nsamples ≥ 16` and logs `mean(chirality) ∈ [-1,+1]` (not the ±1 single sample).
+1. sbatch script sets `opt.accumulate_grad_batches=1` (removes the known no-op). Memory's fix options 2 (`raise datamodule.repeat ≥ 20`) and 3 (`loss_accumulation_steps=K`) are **out of scope** for this sweep — do not pick them even though memory lists them as valid.
+2. sbatch script sets eval `nsamples=16`. Relies on existing chirality aggregation at `protein_eval.py:291`; subagent MUST verify that reducer averages `chirality_mf1` rather than majority-voting before relying on it, and include the verification in the hypothesis doc. If the reducer is not an average, subagent must add an averaging emit alongside the existing one (not replace it) — architect sign-off required in Round 2.
 3. sbatch script logs `len(train_dataloader)` and per-epoch optimizer-step count at startup.
-4. sbatch script keeps `datamodule.repeat=2`, `batch_size=2`, `max_epochs=20000` unless the hypothesis explicitly justifies changing them (justification goes in the hypothesis doc).
+4. sbatch script keeps `datamodule.repeat=2`, `batch_size=2`, `max_epochs=20000` **unchanged**. Changes to these three knobs are forbidden — any hypothesis that requires different values must be rejected in Round 2 and re-pitched.
 5. Branch does NOT modify `accumulate_grad_batches` semantics in code — guardrail #1 handles it via config.
 6. Branch must not bundle unrelated changes (e.g., refactors, cosmetic fixes).
 7. No `--no-verify` on commits; no force-push; no PR creation (branches stay local + pushed to origin for user).
 
 ## Git hygiene
 
-- Orchestrator dispatches implementation subagents with the `Agent` tool's `isolation: "worktree"` parameter. The tool creates a temporary git worktree automatically based on current HEAD (main).
-- Subagent must rename the auto-generated branch to `hyp/<slug>` as its first action, then use that branch for all commits. Orchestrator supplies the slug in the prompt.
+- Orchestrator pre-creates each branch via `git branch hyp/<slug> main`, then dispatches implementation subagents with the `Agent` tool's `isolation: "worktree"` parameter targeting that branch. No rename happens.
 - Each subagent works inside its worktree only. No cross-worktree file reads.
 - On successful Round 4 sign-off, orchestrator pushes the branch to `origin` with `-u`. Worktrees are kept so user can inspect.
 - Commits use normal `git commit -m` (no Claude co-author trailer, per user memory).
@@ -173,7 +174,7 @@ For each sbatch, ML scientist checks:
 From memory §4 (remaining causes after LR-peak refutation) and §6 (loss formulation changes):
 
 - **H-A (pin-chirality-scaling):** Put chirality term inside `adaptive_loss`, or multiply chirality by `(loss_mf.detach()+eps)^norm_p`. Mechanism: preserves chirality/MF ratio under norm_p>0, preventing chirality from being crushed as MF drops. Prediction: at norm_p=1, chirality gradient no longer vanishes; reflected-RMSD separates from mirror plateau by gs 5K.
-- **H-B (raise chirality-t_max + large-t hinge):** Move `chirality_t_max` from 0.3 to ~1.0 and re-time the hinge near t=1. Mechanism: handedness is decided at large t (near noise); current small-t gate has near-zero gradient because `x_1_pred ≈ x_1` at r=t small.
+- **H-B (introduce a t-gate for chirality and bias toward large t):** Currently the chirality hinge runs at whatever `t_ext` is sampled for the MeanFlow batch (no dedicated t-gate exists at `model_trainer_base.py:370-387`). Add a `chirality.t_min` config (e.g., 0.5) so the hinge only fires when `t_ext >= t_min`, OR resample a separate large-t for chirality. Mechanism: handedness is decided at large t (near noise); at small t, `x_1_pred ≈ x_1` and the hinge has near-zero gradient. **This is a scope expansion**: subagent must add the config key and the gate together in one localized change.
 - **H-C (global signed-volume term):** Add a global signed-volume term (not per-window margin). Mechanism: fixes the near-planar margin collapse and gives a basin-global chirality gradient.
 - **H-D (eval on clean MF prediction):** Change eval to use clean MF prediction (r=0 path) and increase `nsamples ≥ 16`. Mechanism: reduces eval variance; the plateau may partly be a measurement artifact, not a training artifact.
 - **H-E (2-pass self-cond at inference):** Run inference with one warmup pass feeding `x_sc` into a refinement pass. Mechanism: fixes train/infer `x_sc` distribution shift (train sees warmup-noisy `x_sc`, infer sees zeros).
@@ -183,14 +184,14 @@ These are seeds. Subagents may propose others if they cite a mechanism grounded 
 
 ## Orchestration (what I do)
 
-1. Dispatch a **spec-review subagent** (`subagent_type: general-purpose`, model: opus) with this spec and the memory file. Returns: ambiguities, contradictions, or gaps that would cause downstream agents to drift. I apply fixes inline before proceeding.
-2. Dispatch 3 hypothesis subagents in parallel (Round 1).
-3. Dispatch architect + ML scientist in parallel with all three pitches (Round 2).
-4. Reconcile verdicts; tiebreaker subagent for APPROVE+REJECT splits; loop REVISE slots.
-5. Create worktrees for approved hypotheses.
-6. Dispatch 3 implementation subagents in parallel (Round 3), each in its worktree.
-7. Dispatch architect + ML scientist to review each branch (Round 4, parallelizable per branch).
-8. Push branches to origin.
+1. Dispatch a **spec-review subagent** (`subagent_type: general-purpose`, model: opus) with this spec and the memory file. Returns: ambiguities, contradictions, or gaps that would cause downstream agents to drift. Apply fixes inline.
+2. **Freeze spec version.** After applying spec-review fixes, commit and capture the commit SHA. All downstream agent prompts (Round 1–4) cite this SHA and are told: "if you read a different version of this file, report back and stop." If later edits are required, abort and restart Round 1.
+3. Dispatch 3 hypothesis subagents in parallel (Round 1).
+4. Dispatch architect + ML scientist in parallel with all three pitches (Round 2).
+5. Reconcile verdicts; tiebreaker subagent for any split; loop REVISE slots (max 1 revision, max 1 restart per slot).
+6. Pre-create `hyp/<slug>` branches on main; dispatch 3 implementation subagents in parallel (Round 3), each in its own worktree.
+7. Dispatch architect + ML scientist to review each branch (Round 4, parallelizable per branch; max 2 review iterations per branch before tiebreaker).
+8. Push branches to origin with `-u`.
 9. Report: three branch names + sbatch paths + hypothesis docs.
 
 ## Risks and mitigations
