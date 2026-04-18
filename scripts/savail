@@ -1,0 +1,127 @@
+#!/bin/bash
+# ============================================================
+# gpu_status.sh — GPU status on a SLURM cluster
+#
+# Usage:
+# ./gpu_status.sh Show summary by GPU type only
+# ./gpu_status.sh -n Show per-node breakdown + summary
+# ./gpu_status.sh --nodes Show per-node breakdown + summary
+# ============================================================
+
+SHOW_NODES=false
+if [[ "$1" == "-n" ]] || [[ "$1" == "--nodes" ]]; then
+SHOW_NODES=true
+fi
+
+TOTAL_ALL=0
+USED_ALL=0
+
+declare -A SEEN # dedup nodes across partitions
+declare -A TYPE_TOTAL # totals per GPU type
+declare -A TYPE_USED # used per GPU type
+
+# ── Print per-node header if requested ──────────────────────
+if $SHOW_NODES; then
+echo "==========================================================="
+echo " SLURM Per-Node GPU Status"
+echo "==========================================================="
+printf "%-20s %-10s %-8s %-8s %-8s\n" \
+"NODE" "GPU TYPE" "TOTAL" "USED" "FREE"
+echo "-----------------------------------------------------------"
+fi
+
+while IFS='|' read -r node state gres gres_used; do
+node=$(echo "$node" | xargs)
+state=$(echo "$state" | xargs)
+gres=$(echo "$gres" | xargs)
+gres_used=$(echo "$gres_used" | xargs)
+
+[[ -n "${SEEN[$node]}" ]] && continue
+SEEN[$node]=1
+
+[[ "$gres" != *gpu* ]] && continue
+
+# ── Parse GPU type ──
+gpu_type=$(echo "$gres" | grep -oP 'gpu:\K[^:,(]+(?=:\d+)')
+gpu_type=${gpu_type:-"generic"}
+
+# ── Parse TOTAL GPUs ──
+total=$(echo "$gres" | grep -oP 'gpu(:[^:,(]+)?:(\d+)' | grep -oP '\d+$')
+total=${total:-0}
+
+# ── Parse USED GPUs ──
+used=$(echo "$gres_used" | grep -oP 'gpu(:[^:,(]+)?:(\d+)' | grep -oP '\d+$')
+used=${used:-0}
+
+# ── Handle down/drained nodes ──
+if [[ "$state" == *drain* ]] || [[ "$state" == *down* ]]; then
+free=0
+else
+free=$(( total - used ))
+fi
+
+# ── Per-node output ──
+if $SHOW_NODES; then
+if [[ "$state" == *drain* ]] || [[ "$state" == *down* ]]; then
+color="\033[0;90m"
+elif (( free == 0 )); then color="\033[0;31m"
+elif (( free == total )); then color="\033[0;32m"
+else color="\033[0;33m"
+fi
+reset="\033[0m"
+
+printf "${color}%-20s %-10s %-8s %-8s %-8s${reset}\n" \
+"$node" "$gpu_type" "$total" "$used" "$free"
+fi
+
+# Accumulate per-type totals
+TYPE_TOTAL[$gpu_type]=$(( ${TYPE_TOTAL[$gpu_type]:-0} + total ))
+TYPE_USED[$gpu_type]=$(( ${TYPE_USED[$gpu_type]:-0} + used ))
+
+TOTAL_ALL=$(( TOTAL_ALL + total ))
+USED_ALL=$(( USED_ALL + used ))
+
+done < <(sinfo --Node --noheader --Format="NodeHost:|,StateLong:|,Gres:|,GresUsed:" 2>/dev/null)
+
+FREE_ALL=$(( TOTAL_ALL - USED_ALL ))
+
+if $SHOW_NODES; then
+echo "==========================================================="
+printf "%-20s %-10s %-8s %-8s %-8s\n" \
+"TOTAL" "" "$TOTAL_ALL" "$USED_ALL" "$FREE_ALL"
+echo "==========================================================="
+echo ""
+fi
+
+# ── Summary by GPU type (always shown) ──────────────────────
+echo "==========================================================="
+echo " Summary by GPU Type"
+echo "==========================================================="
+printf "%-15s %-10s %-10s %-10s %-10s\n" \
+"GPU TYPE" "TOTAL" "USED" "FREE" "UTIL %"
+echo "-----------------------------------------------------------"
+
+for gpu_type in $(echo "${!TYPE_TOTAL[@]}" | tr ' ' '\n' | sort); do
+t=${TYPE_TOTAL[$gpu_type]}
+u=${TYPE_USED[$gpu_type]}
+f=$(( t - u ))
+if (( t > 0 )); then
+pct=$(( u * 100 / t ))
+else
+pct=0
+fi
+
+if (( pct >= 90 )); then color="\033[0;31m"
+elif (( pct >= 50 )); then color="\033[0;33m"
+else color="\033[0;32m"
+fi
+reset="\033[0m"
+
+printf "${color}%-15s %-10s %-10s %-10s %s%%${reset}\n" \
+"$gpu_type" "$t" "$u" "$f" "$pct"
+done
+
+echo "-----------------------------------------------------------"
+printf "%-15s %-10s %-10s %-10s\n" \
+"ALL" "$TOTAL_ALL" "$USED_ALL" "$FREE_ALL"
+echo "==========================================================="

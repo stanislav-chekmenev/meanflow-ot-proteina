@@ -30,7 +30,9 @@ dataset_config_subdir: pdb
 
 force_precision_f32: False
 training:
+  loss_accumulation_steps: 1
   self_cond: False
+  self_cond_prob: 0.5
   fold_cond: False
   mask_T_prob: 0.5
   mask_A_prob: 0.5
@@ -42,6 +44,7 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
+    noise_samples: 128
   meanflow:
     # Current proteina defaults.
     # For reference, CIFAR10 MeanFlow v1 uses: ratio=0.75, P_mean_t=-0.6,
@@ -54,12 +57,21 @@ training:
     norm_p: 1.0
     norm_eps: 0.001
     nsteps_sample: 1
+  chirality_loss:
+    enabled: False
+    weight: 1.0
+    margin_alpha: 0.1
+    stride: 1
 
 opt:
   lr: 0.0001
-  max_epochs: 3000            # Short debug run
+  init_lr: 0.0  # Starting LR at the beginning of warmup (0 = warmup from zero)
+  end_lr: 0.0  # Minimum LR after decay (0 = decay all the way to zero)
+  warmup_steps: 3000  # Number of linear warmup steps (0 = no warmup)
+  lr_decay_total_steps: 23000  # Total steps for warmup + linear decay schedule (0 = constant LR)
+  max_epochs: 20000            # Short debug run
   log_every_n_steps: 1
-  accumulate_grad_batches: 20
+  accumulate_grad_batches: 1
   val_check_interval: 999999  # Effectively disable validation (empty val set)
   skip_nan_grad: False
   grad_and_weight_analysis: False
@@ -82,6 +94,6 @@ ema:
 
 eval:
   enabled: true
-  every_n_steps: 500
+  every_n_steps: 1
   n_residues: 76
   ground_truth_pdb: ${oc.env:DATA_PATH}/debug/raw/1ubq.cif

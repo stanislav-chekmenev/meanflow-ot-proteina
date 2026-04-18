@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=mf_debug
-#SBATCH --partition=h100
-#SBATCH --qos=debug
-#SBATCH --gres=gpu:h100nvl:1
+#SBATCH --partition=gpu
+#SBATCH --qos=normal
+#SBATCH --gres=gpu:rtx6000:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=40G
-#SBATCH --time=0-01:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
+#SBATCH --time=0-04:00:00
 #SBATCH --output=logs/train_debug_%j.out
 #SBATCH --error=logs/train_debug_%j.err
 
@@ -75,19 +75,69 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
 export NCCL_SHM_DISABLE=0
 
+# --- Configurable Hydra overrides ---
+# Experiment config (training_ca_debug.yaml)
+EXP_NAME="meanflow-base-p0-bs2" 
+ACCUMULATE_GRAD_BATCHES=10
+EVAL_EVERY_N_STEPS=250
+OT_COUPLING_ENABLED=False
+MEANFLOW_NORM_P=1
+NCPUS_PER_TASK_TRAIN=16
+NCPUS_PER_TASK_PREPRO=2
+NOISE_SAMPLES=0
+LOSS_ACCUMULATION_STEPS=1
+MAX_EPOCHS=20000
+WARMUP_STEPS=1000
+LR_DECAY_TOTAL_STEPS=23000
+INIT_LR=1e-6
+END_LR=5e-6
+LR=1.e-4
+
+# Self-conditioning
+SELF_COND=False
+SELF_COND_PROB=0.5
+
+# Chirality hinge loss
+CHIRALITY_ENABLED=False
+CHIRALITY_WEIGHT=1.0
+CHIRALITY_MARGIN_ALPHA=0.1
+CHIRALITY_STRIDE=1
+
+# Dataset config (pdb_debug.yaml)
+DATAMODULE_REPEAT=2
+DATAMODULE_BATCH_SIZE=2
+
 # --- Run training ---
-# MeanFlow debug: 1 protein (1UBQ, 76 residues), 1 GPU, no wandb/checkpointing.
-#
-# Reference: CIFAR10 MeanFlow v1 uses torchrun with:
-#   --ratio 0.75  --P_mean_t -0.6  --P_std_t 1.6
-#   --P_mean_r -4.0  --P_std_r 1.6  --norm_p 0.75
-# Current proteina config uses shared P_mean/P_std for t and r.
-# The values can be tuned in training_ca_debug.yaml.
 echo "Starting MeanFlow debug training..."
 srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
     --config_name training_ca_debug \
     --single \
-    --show_prog_bar
+    --show_prog_bar \
+    --exp_overrides \
+        run_name_=$EXP_NAME \
+        opt.lr=$LR \
+        opt.accumulate_grad_batches=$ACCUMULATE_GRAD_BATCHES \
+        opt.max_epochs=$MAX_EPOCHS \
+        opt.warmup_steps=$WARMUP_STEPS \
+        opt.lr_decay_total_steps=$LR_DECAY_TOTAL_STEPS \
+        opt.init_lr=$INIT_LR \
+        opt.end_lr=$END_LR \
+        eval.every_n_steps=$EVAL_EVERY_N_STEPS \
+        training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
+        training.meanflow.norm_p=$MEANFLOW_NORM_P \
+        hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
+        training.ot_coupling.noise_samples=$NOISE_SAMPLES \
+        training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
+        hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
+        training.self_cond=$SELF_COND \
+        training.self_cond_prob=$SELF_COND_PROB \
+        training.chirality_loss.enabled=$CHIRALITY_ENABLED \
+        training.chirality_loss.weight=$CHIRALITY_WEIGHT \
+        training.chirality_loss.margin_alpha=$CHIRALITY_MARGIN_ALPHA \
+        training.chirality_loss.stride=$CHIRALITY_STRIDE \
+    --data_overrides \
+        datamodule.repeat=$DATAMODULE_REPEAT \
+        datamodule.batch_size=$DATAMODULE_BATCH_SIZE
 
 echo "==========================================="
 echo "Job completed: $(date)"

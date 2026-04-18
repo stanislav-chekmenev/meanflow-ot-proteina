@@ -8,6 +8,7 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
+import copy
 import pathlib
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
@@ -373,7 +374,9 @@ class PDBDataset(Dataset):
 
         if self.in_memory:
             logger.info("Reading data into memory")
-            self.data = [torch.load(self.processed_dir / f"{f}.pt", weights_only=False) for f in tqdm(file_names)]
+            unique_files = list(dict.fromkeys(file_names))
+            unique_data = {f: torch.load(self.processed_dir / f"{f}.pt", weights_only=False) for f in tqdm(unique_files)}
+            self.data = [copy.deepcopy(unique_data[f]) for f in file_names]
 
     def __len__(self):
         return len(self.file_names)
@@ -420,6 +423,7 @@ class PDBLightningDataModule(BaseLightningDataModule):
         overwrite: bool = False,
         store_het: bool = False,
         store_bfactor: bool = True,
+        repeat: int = 1,
         # arguments for BaseLightningDataModule
         batch_padding: bool = True,
         sampling_mode: Literal["random", "cluster-random", "cluster-reps"] = "random",
@@ -491,6 +495,7 @@ class PDBLightningDataModule(BaseLightningDataModule):
         self.in_memory = in_memory
         self.store_het = store_het
         self.store_bfactor = store_bfactor
+        self.repeat = repeat
         self.df_data = None
         self.dfs_splits = None
         self.clusterid_to_seqid_mappings = None
@@ -767,6 +772,12 @@ class PDBLightningDataModule(BaseLightningDataModule):
         else:
             chains = None
             file_names = [f"{pdb}" for pdb in pdb_codes]
+
+        if self.repeat > 1:
+            pdb_codes = pdb_codes * self.repeat
+            file_names = file_names * self.repeat
+            if chains is not None:
+                chains = chains * self.repeat
 
         return PDBDataset(
             pdb_codes=pdb_codes,

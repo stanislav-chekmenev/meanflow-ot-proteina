@@ -164,7 +164,7 @@ class OTPlanSampler:
             x1 = x1.reshape(x1.shape[0], -1)
         # M[i,j] = ||x1[i] - x0[j]||^2 so that j[i] gives the x0 index
         # that should pair with x1[i], and x0[j] is the correct permutation.
-        M = torch.cdist(x1.detach(), x0.detach()) ** 2
+        M = torch.cdist(x0.detach(), x1.detach()) ** 2
         if self.normalize_cost:
             M = M / M.max()
         _, j = scipy.optimize.linear_sum_assignment(M.cpu().numpy())
@@ -222,27 +222,10 @@ class MaskedOTPlanSampler:
         Returns:
             Tuple of (x_0_permuted, x_1_unchanged), both shape [B, N, 3].
         """
-        B, N, D = x_0.shape
+        j_tensor = self.sample_plan_with_scipy(x_0, x_1, mask)  # Get permutation indices
+        x_1_permuted = x_1[j_tensor]
 
-        # Zero out padded positions so they don't affect OT cost
-        mask_3d = mask[..., None]  # [B, N, 1]
-        x_0_masked = (x_0 * mask_3d).reshape(B, -1)  # [B, N*3]
-        x_1_masked = (x_1 * mask_3d).reshape(B, -1)  # [B, N*3]
-
-        # Cost matrix: M[i,j] = ||x_1[i] - x_0[j]||^2 so that j[i] gives
-        # the x_0 index that should pair with x_1[i].
-        M = torch.cdist(x_1_masked, x_0_masked) ** 2  # [B, B]
-        if self.ot_plan_sampler.normalize_cost:
-            M = M / M.max()
-
-        # Solve assignment (Hungarian algorithm)
-        _, j = scipy.optimize.linear_sum_assignment(M.detach().cpu().numpy())
-
-        # Permute x_0 using original (non-flattened) tensor
-        j_tensor = torch.tensor(j, dtype=torch.long, device=x_0.device)
-        x_0_permuted = x_0[j_tensor]
-
-        return x_0_permuted, x_1
+        return x_0, x_1_permuted
 
     def sample_plan_with_scipy(
         self,
@@ -274,7 +257,7 @@ class MaskedOTPlanSampler:
 
         # Cost matrix: M[i,j] = ||x_1[i] - x_0[j]||^2 so that j[i] gives
         # the x_0 index that should pair with x_1[i].
-        M = torch.cdist(x_1_masked, x_0_masked) ** 2  # [B, B]
+        M = torch.cdist(x_0_masked, x_1_masked) ** 2  # [B, B]
         if self.ot_plan_sampler.normalize_cost:
             M = M / M.max()
 
