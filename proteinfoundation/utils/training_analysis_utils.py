@@ -34,6 +34,42 @@ class CheckGradientsCallback(Callback):
                 print(f"Parameter without gradient: {name}")
 
 
+class StartupInfoCallback(Callback):
+    """Logs the training dataloader length and optimizer-steps-per-epoch at
+    training start (guardrail #3 for the RMSD-plateau hypothesis sweep).
+
+    ``accumulate_grad_batches`` is silently a no-op when there is only one
+    micro-batch per epoch (Lightning 2.5 flushes optimizer state on the final
+    batch of every epoch). Logging the dataloader length at startup makes this
+    behaviour visible in job logs so it cannot silently bite hypothesis runs.
+    """
+
+    def on_train_start(self, trainer, pl_module):
+        if trainer.is_global_zero:
+            try:
+                dl = trainer.train_dataloader
+                dl_len = len(dl) if dl is not None else -1
+            except Exception as e:
+                logger.warning(f"StartupInfoCallback: could not read len(train_dataloader): {e}")
+                dl_len = -1
+            accum = getattr(trainer, "accumulate_grad_batches", 1) or 1
+            # With 1 micro-batch/epoch and single-GPU, 1 epoch == 1 optimizer
+            # step regardless of accumulate_grad_batches (Lightning flushes on
+            # the final batch). Log the expected number to aid diagnosis.
+            if dl_len <= 0:
+                opt_steps_per_epoch_msg = "unknown"
+            else:
+                # PL 2.5 force-steps on the final batch, so the effective
+                # steps/epoch is the ceiling of dl_len / accum, bounded below
+                # by 1.
+                eff = max(1, (dl_len + accum - 1) // accum)
+                opt_steps_per_epoch_msg = f"{eff} (dl_len={dl_len}, accum={accum})"
+            logger.info(
+                f"StartupInfoCallback: len(train_dataloader)={dl_len} | "
+                f"optimizer_steps_per_epoch={opt_steps_per_epoch_msg}"
+            )
+
+
 class LogEpochTimeCallback(Callback):
     """Simple callback that logs how long each epoch takes, in seconds, to a pytorch lightning log"""
 
