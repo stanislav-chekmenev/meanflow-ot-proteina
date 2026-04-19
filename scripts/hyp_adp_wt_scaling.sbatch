@@ -138,6 +138,12 @@ echo "==========================================="
 
 # --- Run training ---
 echo "Starting hyp_adp_wt_scaling training..."
+
+# cd into CODE_ROOT so Python's implicit sys.path[0] (cwd) matches the
+# worktree. Otherwise 'import proteinfoundation' resolves to whichever
+# directory sbatch was submitted from — typically the primary repo on
+# main, which silently bypasses all hypothesis-branch code.
+cd "$CODE_ROOT"
 srun python "$CODE_ROOT/proteinfoundation/train.py" \
     --config_name training_ca_debug \
     --single \
