@@ -104,8 +104,11 @@ class ProteinEvalCallback(Callback):
         self.n_residues = n_residues
         self.ground_truth_pdb_path = ground_truth_pdb_path
         # nsamples: number of generations to draw per eval call. Per-sample
-        # RMSDs and chirality are averaged so the logged metric is lower-variance.
-        # nsamples=1 preserves the original 1-bit chirality behaviour.
+        # RMSDs and chirality are averaged so the logged metric is
+        # lower-variance; in particular mean-chirality becomes a real-valued
+        # estimator in [-1, +1] rather than a 1-bit Bernoulli sample (memory
+        # note #3 in project_debug_meanflow_1ubq_analysis.md). nsamples=1
+        # preserves the original 1-bit chirality behaviour.
         assert nsamples >= 1, f"nsamples must be >= 1, got {nsamples}"
         self.nsamples = int(nsamples)
 
@@ -264,10 +267,12 @@ class ProteinEvalCallback(Callback):
             use_fm_euler: if True, use FM-style ODE (h=0) instead of MeanFlow.
 
         Returns:
-            Tuple (pdb_path, rmsd_mean, rmsd_reflected_mean, chirality_mean).
-            When nsamples > 1, RMSDs and chirality are averaged across the
-            batch — chirality in particular becomes a real-valued estimator
-            in [-1, +1] rather than a 1-bit Bernoulli sample.
+            Tuple (pdb_path, rmsd, rmsd_reflected, chirality).
+            - rmsd / rmsd_reflected are the mean over ``self.nsamples``.
+            - chirality is the MEAN of per-sample signs in [-1, +1] — reducing
+              the 1-bit artifact at ``nsamples=1`` to a continuous signal that
+              can discriminate slow drift.
+            Values are ``None`` when no GT is available.
         """
         nsamples = self.nsamples
         with torch.no_grad():
@@ -281,12 +286,13 @@ class ProteinEvalCallback(Callback):
                 )
             atom37 = pl_module.samples_to_atom37(samples)  # [nsamples, n, 37, 3]
 
-        # Write PDB for the first sample only (WandB molecule viewer).
+        # Write PDB for the FIRST sample (keeps the WandB 3-D Molecule
+        # visualisation intact regardless of ``nsamples``).
         pdb_path = os.path.join(self._tmp_dir, f"generated_{label}_step{step}.pdb")
-        atom37_np_all = atom37.cpu().numpy()
-        write_prot_to_pdb(atom37_np_all[0], pdb_path, overwrite=True, no_indexing=True)
+        atom37_np = atom37.cpu().numpy()
+        write_prot_to_pdb(atom37_np[0], pdb_path, overwrite=True, no_indexing=True)
 
-        # Compute RMSD vs ground truth, plus chirality metrics, aggregated
+        # Compute RMSD vs ground truth, plus chirality metrics, averaged
         # over the nsamples generated samples.
         rmsd = None
         rmsd_reflected = None
@@ -295,9 +301,9 @@ class ProteinEvalCallback(Callback):
         if gt_ca is not None:
             rmsds = []
             rmsds_refl = []
-            chiralities = []
-            for i in range(atom37_np_all.shape[0]):
-                gen_ca = atom37_np_all[i, :, _CA_INDEX, :]
+            chirs = []
+            for b in range(atom37_np.shape[0]):
+                gen_ca = atom37_np[b, :, _CA_INDEX, :]  # [n, 3]
                 n_common = min(len(gt_ca), len(gen_ca))
                 if n_common <= 0:
                     continue
@@ -305,12 +311,13 @@ class ProteinEvalCallback(Callback):
                 gt_c = gt_ca[:n_common]
                 rmsds.append(_ca_rmsd(gen_c, gt_c))
                 rmsds_refl.append(_ca_rmsd_with_reflection(gen_c, gt_c))
-                chiralities.append(_chirality_sign(gen_c, gt_c))
+                chirs.append(_chirality_sign(gen_c, gt_c))
             if rmsds:
                 rmsd = float(np.mean(rmsds))
                 rmsd_reflected = float(np.mean(rmsds_refl))
-                # Mean over +-1 flags -> real-valued estimator in [-1, +1].
-                chirality = float(np.mean(chiralities))
+                # Mean over +-1 flags -> real-valued estimator in [-1, +1];
+                # preserves the single-sample semantics at nsamples=1 (still ±1).
+                chirality = float(np.mean(chirs))
 
         return pdb_path, rmsd, rmsd_reflected, chirality
 
@@ -401,7 +408,7 @@ class ProteinEvalCallback(Callback):
 
             # Summary: "R" = proper-rotation RMSD, "R*" = reflection allowed,
             # "c" = mean chirality over nsamples generations (float in [-1, +1];
-            # +1 = all correct, -1 = all mirrored).
+            # +1 = all correct, -1 = all mirrored, 0 = 50/50 split).
             def _fmt(label, rmsd, rmsd_refl, chir):
                 if rmsd is None:
                     return None

@@ -180,6 +180,7 @@ def _make_fake_trainer():
     # Bind the real method from the class (not the instance).
     from proteinfoundation.proteinflow.model_trainer_base import ModelTrainerBase
     trainer.adaptive_loss = ModelTrainerBase.adaptive_loss.__get__(trainer)
+    trainer._compute_adp_wt = ModelTrainerBase._compute_adp_wt.__get__(trainer)
     trainer._compute_single_noise_loss = (
         ModelTrainerBase._compute_single_noise_loss.__get__(trainer)
     )
@@ -242,14 +243,14 @@ def test_chirality_loss_added_when_enabled():
     # --- Enabled run ---
     trainer.chirality_loss_enabled = True
     torch.manual_seed(0)
-    loss_enabled, _, _, raw_loss_chir = trainer._compute_single_noise_loss(
+    loss_enabled, _, _, raw_loss_chir, _ = trainer._compute_single_noise_loss(
         x_1, mask, t_ext, r_ext, t, batch, B,
     )
 
     # --- Disabled run (same NN, same seed => same noise sample) ---
     trainer.chirality_loss_enabled = False
     torch.manual_seed(0)
-    loss_disabled, _, _, raw_loss_chir_off = trainer._compute_single_noise_loss(
+    loss_disabled, _, _, raw_loss_chir_off, _ = trainer._compute_single_noise_loss(
         x_1, mask, t_ext, r_ext, t, batch, B,
     )
 
@@ -279,7 +280,7 @@ def test_self_cond_plumbing_warmup_and_injection():
 
     # use_sc=False: NN called exactly twice (JVP primal + FM sub-pass),
     # neither call should contain x_sc.
-    loss, _, _, _ = trainer._compute_single_noise_loss(
+    loss, _, _, _, _ = trainer._compute_single_noise_loss(
         x_1, mask, t_ext, r_ext, t, batch, B, use_sc=False,
     )
     n_calls_off = len(trainer.nn.calls)
@@ -290,7 +291,7 @@ def test_self_cond_plumbing_warmup_and_injection():
     trainer.nn.calls.clear()
 
     # use_sc=True: one extra warmup call; the JVP and FM calls must receive x_sc.
-    loss, _, _, _ = trainer._compute_single_noise_loss(
+    loss, _, _, _, _ = trainer._compute_single_noise_loss(
         x_1, mask, t_ext, r_ext, t, batch, B, use_sc=True,
     )
     n_calls_on = len(trainer.nn.calls)

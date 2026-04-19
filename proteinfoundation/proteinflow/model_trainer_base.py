@@ -258,6 +258,21 @@ class ModelTrainerBase(L.LightningModule):
         adp_wt = (loss.detach() + norm_eps) ** norm_p
         return (loss / adp_wt)
 
+    def _compute_adp_wt(self, loss):
+        """Return the adaptive-weight tensor ``(loss.detach() + eps)^p`` for
+        the SAME (norm_p, norm_eps) used by ``adaptive_loss``.
+
+        Returns a tensor of ones with ``loss``'s shape/device when the knobs
+        are absent (so downstream multipliers are no-ops). Sharing this
+        computation between MF and auxiliary losses (e.g. chirality) keeps
+        their relative scale invariant under ``norm_p``.
+        """
+        norm_p = self.cfg_exp.training.meanflow.get("norm_p", None)
+        norm_eps = self.cfg_exp.training.meanflow.get("norm_eps", None)
+        if norm_p is None or norm_eps is None:
+            return torch.ones_like(loss)
+        return (loss.detach() + norm_eps) ** norm_p
+
     def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B, *, use_sc=False):
         """
         Runs one noise sample through the MeanFlow + FM loss pipeline.
@@ -283,6 +298,8 @@ class ModelTrainerBase(L.LightningModule):
             raw_loss_mf: scalar tensor (detached mean, for logging)
             raw_loss_fm: scalar tensor (detached mean, for logging)
             raw_loss_chir: scalar tensor (detached, for logging; zero when disabled)
+            raw_adp_wt_mean: scalar tensor (detached mean of per-sample adp_wt,
+                for logging the shared MF/chirality scaling knob)
         """
         n = x_1.shape[-2]
         dtype = x_1.dtype
@@ -356,6 +373,12 @@ class ModelTrainerBase(L.LightningModule):
         error = (u_pred - u_tgt) * mask[..., None]
         loss_mf = (error ** 2).sum(dim=(-1, -2)) / nres
         raw_loss_mf = loss_mf.mean().detach() # use for logging, before adaptive weighting
+        # Compute adp_wt ONCE from the per-sample MF loss and reuse it for
+        # both the MF-side division (via adaptive_loss) and the chirality
+        # scaling below. At norm_p=0, adp_wt is identically 1 → backward
+        # compatible with the baseline.
+        adp_wt_mf = self._compute_adp_wt(loss_mf)
+        raw_adp_wt_mean = adp_wt_mf.mean().detach()
         loss_mf = self.adaptive_loss(loss_mf).mean()
 
         # 5. FM loss
@@ -416,9 +439,17 @@ class ModelTrainerBase(L.LightningModule):
             gated = loss_chir_per_sample * gate  # [B]
             loss_chir = gated.mean()
             raw_loss_chir = loss_chir.detach()
-            combined_adp_loss = combined_adp_loss + self.chirality_loss_weight * loss_chir
+            # Apply the SAME per-step adp_wt used on the MF loss so MF and
+            # chirality gradients stay at the same scale under norm_p > 0.
+            # chirality_hinge_loss returns a scalar; adp_wt_mf is per-sample
+            # ([B]), so we divide by its batch-mean (detached, already
+            # detached inside _compute_adp_wt). At norm_p=0 this mean == 1,
+            # so the branch is numerically identical to the baseline.
+            adp_wt_chir = adp_wt_mf.mean()
+            loss_chir_scaled = loss_chir / adp_wt_chir
+            combined_adp_loss = combined_adp_loss + self.chirality_loss_weight * loss_chir_scaled
 
-        return combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir
+        return combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir, raw_adp_wt_mean
 
     def training_step(self, batch, batch_idx, *, val_step=False):
         """
@@ -507,7 +538,7 @@ class ModelTrainerBase(L.LightningModule):
 
         # --- 3. K=1 path (automatic optimization, identical to pre-refactor behavior) ---
         if K == 1:
-            combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir = self._compute_single_noise_loss(
+            combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir, raw_adp_wt_mean = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
             )
 
@@ -556,6 +587,17 @@ class ModelTrainerBase(L.LightningModule):
                     sync_dist=True,
                     add_dataloader_idx=False,
                 )
+                self.log(
+                    f"{log_prefix}/raw_adp_wt_mean",
+                    raw_adp_wt_mean,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    batch_size=mask.shape[0],
+                    sync_dist=True,
+                    add_dataloader_idx=False,
+                )
 
                 b, n = mask.shape
                 self.nsamples_processed = (
@@ -590,9 +632,10 @@ class ModelTrainerBase(L.LightningModule):
         total_loss_mf = 0.0
         total_loss_fm = 0.0
         total_loss_chir = 0.0
+        total_adp_wt = 0.0
 
         for _ in range(K):
-            loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_loss_chir_k = self._compute_single_noise_loss(
+            loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_loss_chir_k, raw_adp_wt_mean_k = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
             )
             # Backward with 1/K scaling so accumulated gradient == mean gradient
@@ -600,10 +643,12 @@ class ModelTrainerBase(L.LightningModule):
             total_loss_mf += raw_loss_mf_k.item()
             total_loss_fm += raw_loss_fm_k.item()
             total_loss_chir += raw_loss_chir_k.item()
+            total_adp_wt += raw_adp_wt_mean_k.item()
 
         avg_loss_mf = total_loss_mf / K
         avg_loss_fm = total_loss_fm / K
         avg_loss_chir = total_loss_chir / K
+        avg_adp_wt = total_adp_wt / K
         mf_ratio = self.cfg_exp.training.meanflow.ratio
         avg_combined = (1 - mf_ratio) * avg_loss_fm + mf_ratio * avg_loss_mf
 
@@ -625,6 +670,11 @@ class ModelTrainerBase(L.LightningModule):
         )
         self.log(
             f"{log_prefix}/raw_loss_chirality", avg_loss_chir,
+            on_step=True, on_epoch=True, prog_bar=False, logger=True,
+            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+        )
+        self.log(
+            f"{log_prefix}/raw_adp_wt_mean", avg_adp_wt,
             on_step=True, on_epoch=True, prog_bar=False, logger=True,
             batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
         )
