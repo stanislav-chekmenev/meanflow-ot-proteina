@@ -25,7 +25,10 @@ from loguru import logger
 from torch import Tensor
 
 from proteinfoundation.utils.ff_utils.pdb_utils import mask_cath_code_by_level
-from proteinfoundation.proteinflow.chirality_loss import chirality_hinge_loss
+from proteinfoundation.proteinflow.chirality_loss import (
+    chirality_hinge_loss,
+    chirality_hinge_loss_per_sample,
+)
 
 
 class ModelTrainerBase(L.LightningModule):
@@ -367,20 +370,51 @@ class ModelTrainerBase(L.LightningModule):
         # 6. Combined
         combined_adp_loss = (1 - mf_ratio) * loss_fm + mf_ratio * loss_mf
 
-        # 7. Chirality hinge loss (optional)
+        # 7. Chirality hinge loss (optional, with optional t-gate)
         raw_loss_chir = torch.zeros((), device=self.device)
         if self.chirality_loss_enabled and self.chirality_loss_weight > 0:
             # Recover x_1 prediction from the FM sub-pass velocity:
             # z = (1-t)*x_1 + t*x_0  =>  x_1 ≈ z - t * v  (at r=t).
             x_1_pred = z - t_ext * v_pred
             x_1_pred = self.fm._mask_and_zero_com(x_1_pred, mask)
-            loss_chir = chirality_hinge_loss(
+            # Per-sample hinge so we can apply a per-sample t-gate before
+            # reducing.
+            loss_chir_per_sample = chirality_hinge_loss_per_sample(
                 x_pred=x_1_pred,
                 x_gt=x_1,
                 mask=mask,
                 margin_alpha=self.chirality_margin_alpha,
                 stride=self.chirality_stride,
-            )
+            )  # [B]
+
+            # t-gate: only fire the chirality hinge for low t (near clean data),
+            # where `x_1_pred = z - t*v` approximates x_1 well. At high t, the
+            # prediction is dominated by noise and T_pred is uninformative;
+            # firing the hinge there averages high-variance/low-signal into
+            # the gradient and masks the MeanFlow signal.
+            #
+            # `t_gate_max == 1.0` + "hard" is the identity gate (no change in
+            # behaviour vs. ungated chirality) — preserves backwards-compat
+            # when the new config keys are absent.
+            t_gate_max = float(self.chirality_t_gate_max)
+            t_gate_mode = str(self.chirality_t_gate_mode)
+            if t_gate_mode == "hard":
+                gate = (t < t_gate_max).to(loss_chir_per_sample.dtype)
+            elif t_gate_mode == "soft":
+                # Smooth sigmoid gate: ~1 for t << t_gate_max, ~0 for t >> t_gate_max.
+                # Scale picks `t_gate_max` itself (clamped) as the transition width
+                # so the gate is self-scaling without extra hyperparameters.
+                t_sharpness = max(t_gate_max, 1e-3)
+                gate = torch.sigmoid((t_gate_max - t) / t_sharpness).to(
+                    loss_chir_per_sample.dtype
+                )
+            else:
+                raise ValueError(
+                    f"Unknown chirality t_gate_mode: {t_gate_mode!r}; expected 'hard' or 'soft'."
+                )
+
+            gated = loss_chir_per_sample * gate  # [B]
+            loss_chir = gated.mean()
             raw_loss_chir = loss_chir.detach()
             combined_adp_loss = combined_adp_loss + self.chirality_loss_weight * loss_chir
 

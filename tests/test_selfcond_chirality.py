@@ -173,6 +173,9 @@ def _make_fake_trainer():
     trainer.chirality_loss_weight = 1.0
     trainer.chirality_margin_alpha = 0.1
     trainer.chirality_stride = 1
+    # Default t-gate attributes: identity gate (backward-compat).
+    trainer.chirality_t_gate_max = 1.0
+    trainer.chirality_t_gate_mode = "hard"
     trainer.self_cond_prob = 0.5
     # Bind the real method from the class (not the instance).
     from proteinfoundation.proteinflow.model_trainer_base import ModelTrainerBase
