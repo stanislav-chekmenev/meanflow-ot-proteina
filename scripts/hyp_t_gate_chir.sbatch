@@ -134,6 +134,12 @@ DATAMODULE_BATCH_SIZE=2
 echo "Starting MeanFlow training for hypothesis t-gate-chir..."
 echo "Guardrails: accum=$ACCUMULATE_GRAD_BATCHES, eval_nsamples=$EVAL_NSAMPLES, norm_p=$MEANFLOW_NORM_P"
 echo "t-gate: t_gate_max=$CHIRALITY_T_GATE_MAX, t_gate_mode=$CHIRALITY_T_GATE_MODE"
+
+# cd into CODE_ROOT so Python's implicit sys.path[0] (cwd) matches the
+# worktree. Otherwise 'import proteinfoundation' resolves to whichever
+# directory sbatch was submitted from — typically the primary repo on
+# main, which silently bypasses all hypothesis-branch code.
+cd "$CODE_ROOT"
 srun python "$CODE_ROOT/proteinfoundation/train.py" \
     --config_name training_ca_debug \
     --single \
