@@ -211,3 +211,50 @@ class RandomStateCheckpoint(Callback):
         if torch.cuda.is_available() and "cuda_rng_states" in checkpoint:
             for device_idx, state in checkpoint["cuda_rng_states"].items():
                 torch.cuda.set_rng_state(state, device_idx)
+
+
+class TrainLoaderStatsCallback(Callback):
+    """One-shot startup log of train-dataloader size and derived per-epoch
+    optimizer-step count.
+
+    Addresses guardrail #3 from the RMSD plateau hypothesis sweep spec: the
+    single-micro-batch/epoch configuration silently no-ops
+    ``accumulate_grad_batches`` (see memory file
+    ``project_debug_meanflow_1ubq_analysis.md``). Logging
+    ``len(train_dataloader)`` and the predicted per-epoch optimizer-step
+    count at fit start makes the ratio explicit in the training log without
+    requiring analysts to spelunk Lightning internals.
+    """
+
+    def on_fit_start(self, trainer, pl_module):
+        try:
+            dl = trainer.train_dataloader
+            if dl is None:
+                dm = getattr(trainer, "datamodule", None)
+                if dm is not None:
+                    dl = dm.train_dataloader()
+            n_batches = len(dl) if dl is not None else None
+        except Exception as e:  # pragma: no cover — diagnostic only
+            logger.warning(f"TrainLoaderStatsCallback: could not get dataloader length: {e}")
+            n_batches = None
+        accum = getattr(trainer, "accumulate_grad_batches", 1)
+        if n_batches is not None:
+            est_optim_steps_per_epoch = max(1, n_batches // max(1, accum))
+            logger.info(
+                f"[TrainLoaderStatsCallback] len(train_dataloader)={n_batches}  "
+                f"accumulate_grad_batches={accum}  "
+                f"est optim steps/epoch={est_optim_steps_per_epoch}"
+            )
+            if pl_module.logger is not None and hasattr(pl_module.logger, "experiment"):
+                try:
+                    pl_module.logger.experiment.log({
+                        "startup/train_dataloader_len": float(n_batches),
+                        "startup/accumulate_grad_batches": float(accum),
+                        "startup/est_optim_steps_per_epoch": float(est_optim_steps_per_epoch),
+                    }, commit=False)
+                except Exception:
+                    pass
+        else:
+            logger.warning(
+                "[TrainLoaderStatsCallback] Could not determine train dataloader length at fit start"
+            )
