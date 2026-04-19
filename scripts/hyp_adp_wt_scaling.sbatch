@@ -19,15 +19,19 @@ echo "GPU devices: $CUDA_VISIBLE_DEVICES"
 echo "==========================================="
 
 # --- Environment ---
-PROJECT_ROOT="/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina"
+# REPO_ROOT is the primary repo (shared venv tarball, data, logs).
+# CODE_ROOT is this hypothesis's git worktree — configs and code come from
+# the hypothesis branch so the run picks up branch-specific changes.
+REPO_ROOT="/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina"
+CODE_ROOT="$REPO_ROOT/.claude/worktrees/agent-a7dc3fe7"
 DATA_ROOT="/netscratch/schekmenev"
 
 # Unpack .venv to scratch (once per node, skips if already present)
 # Create tarball on login node:
 #   uv venv --relocatable --python 3.11 && uv sync
-#   tar czf "$PROJECT_ROOT/venv.tar.gz" -C "$PROJECT_ROOT" .venv
-PROJECT_NAME="$(basename "$PROJECT_ROOT")"
-ENV_TARBALL="$PROJECT_ROOT/venv.tar.gz"
+#   tar czf "$REPO_ROOT/venv.tar.gz" -C "$REPO_ROOT" .venv
+PROJECT_NAME="$(basename "$REPO_ROOT")"
+ENV_TARBALL="$REPO_ROOT/venv.tar.gz"
 ENV_LOCAL="$DATA_ROOT/venvs/$PROJECT_NAME/.venv"
 
 echo "Setting up virtual environment on node-local scratch..."
@@ -53,19 +57,21 @@ export PATH="$ENV_LOCAL/bin:$PATH"
 
 echo "Virtual environment set up at $ENV_LOCAL"
 
-# Ensure project is importable
-export PYTHONPATH="${PYTHONPATH:-}:$PROJECT_ROOT"
+# Ensure project is importable — use CODE_ROOT so imports resolve to the
+# hypothesis-branch code, not the primary repo's main branch.
+export PYTHONPATH="${PYTHONPATH:-}:$CODE_ROOT"
 export PYTHONUNBUFFERED=1
 
-# DATA_PATH env var — configs resolve ${oc.env:DATA_PATH}/debug/
-export DATA_PATH="$PROJECT_ROOT/data"
+# DATA_PATH env var — configs resolve ${oc.env:DATA_PATH}/debug/.
+# Data lives in REPO_ROOT (shared across worktrees).
+export DATA_PATH="$REPO_ROOT/data"
 
-mkdir -p "$PROJECT_ROOT/logs"
+mkdir -p "$REPO_ROOT/logs"
 
 # --- Prepare debug data (if not already done) ---
 if [ ! -f "$DATA_PATH/debug/processed/1ubq.pt" ]; then
     echo "Processing debug protein..."
-    python "$PROJECT_ROOT/scripts/prepare_debug_data.py"
+    python "$CODE_ROOT/scripts/prepare_debug_data.py"
 fi
 
 # --- NCCL (single-GPU, but keep for consistency) ---
@@ -132,7 +138,7 @@ echo "==========================================="
 
 # --- Run training ---
 echo "Starting hyp_adp_wt_scaling training..."
-srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
+srun python "$CODE_ROOT/proteinfoundation/train.py" \
     --config_name training_ca_debug \
     --single \
     --show_prog_bar \
