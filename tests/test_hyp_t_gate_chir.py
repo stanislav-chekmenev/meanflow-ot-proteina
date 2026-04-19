@@ -115,6 +115,7 @@ def _make_mirror_trainer(B=4, n=12, t_gate_max=1.0, t_gate_mode="hard",
 
     # Bind real methods off the class so we hit the production code path.
     trainer.adaptive_loss = ModelTrainerBase.adaptive_loss.__get__(trainer)
+    trainer._compute_adp_wt = ModelTrainerBase._compute_adp_wt.__get__(trainer)
     trainer._compute_single_noise_loss = (
         ModelTrainerBase._compute_single_noise_loss.__get__(trainer)
     )
@@ -148,7 +149,7 @@ def test_hard_gate_zeroes_chirality_when_all_t_above_cutoff():
     B = x_1.shape[0]
     t_values = torch.full((B,), 0.9)  # all above 0.3
 
-    _, _, _, raw_chir = _run_single_noise_loss(trainer, x_1, mask, t_values)
+    _, _, _, raw_chir, _ = _run_single_noise_loss(trainer, x_1, mask, t_values)
     assert raw_chir.item() == 0.0, (
         f"Hard gate with all t > t_gate_max should zero chirality; got {raw_chir.item()}"
     )
@@ -162,7 +163,7 @@ def test_hard_gate_passes_chirality_when_all_t_below_cutoff():
 
     gated_trainer, x_1, mask = _make_mirror_trainer(
         B=B, n=n, t_gate_max=0.3, t_gate_mode="hard")
-    _, _, _, raw_chir_gated = _run_single_noise_loss(gated_trainer, x_1, mask, t_values)
+    _, _, _, raw_chir_gated, _ = _run_single_noise_loss(gated_trainer, x_1, mask, t_values)
 
     # Reference: direct per-sample helper on x_1_pred = Q @ x_1.
     from proteinfoundation.proteinflow.chirality_loss import (
@@ -189,7 +190,7 @@ def test_hard_gate_mixed_t_keeps_only_below_samples():
 
     gated_trainer, x_1, mask = _make_mirror_trainer(
         B=B, n=n, t_gate_max=0.3, t_gate_mode="hard")
-    _, _, _, raw_chir_gated = _run_single_noise_loss(gated_trainer, x_1, mask, t_values)
+    _, _, _, raw_chir_gated, _ = _run_single_noise_loss(gated_trainer, x_1, mask, t_values)
 
     # Expected: compute per-sample hinge directly on x_1_pred = Q @ x_1 (what
     # the MirrorNN produces regardless of x_0). Apply gate [1,1,0,0], mean / B.
@@ -224,7 +225,7 @@ def test_soft_gate_near_zero_for_large_t():
 
     trainer, x_1, mask = _make_mirror_trainer(
         B=B, n=n, t_gate_max=0.1, t_gate_mode="soft")
-    _, _, _, raw_chir = _run_single_noise_loss(trainer, x_1, mask, t_values)
+    _, _, _, raw_chir, _ = _run_single_noise_loss(trainer, x_1, mask, t_values)
 
     # Independent reference: sum of per-sample hinges / B (ungated).
     from proteinfoundation.proteinflow.chirality_loss import (
@@ -256,7 +257,7 @@ def test_soft_gate_near_full_for_small_t():
 
     trainer, x_1, mask = _make_mirror_trainer(
         B=B, n=n, t_gate_max=1.0, t_gate_mode="soft")
-    _, _, _, raw_chir = _run_single_noise_loss(trainer, x_1, mask, t_values)
+    _, _, _, raw_chir, _ = _run_single_noise_loss(trainer, x_1, mask, t_values)
 
     from proteinfoundation.proteinflow.chirality_loss import (
         chirality_hinge_loss_per_sample,
@@ -290,7 +291,7 @@ def test_default_gate_is_identity():
 
     default_trainer, x_1, mask = _make_mirror_trainer(
         B=B, n=n, t_gate_max=1.0, t_gate_mode="hard")
-    _, _, _, raw_default = _run_single_noise_loss(default_trainer, x_1, mask, t_values)
+    _, _, _, raw_default, _ = _run_single_noise_loss(default_trainer, x_1, mask, t_values)
 
     # Sanity: positive (mirror predictions)
     assert raw_default.item() > 0.0
@@ -366,14 +367,14 @@ def test_mf_loss_unchanged_when_chirality_disabled():
     # Run A: chirality enabled but gate fully OFF (t_gate_max=0, hard -> mask=False for all).
     trainer_a, x_1, mask = _make_mirror_trainer(
         B=B, n=n, t_gate_max=0.0, t_gate_mode="hard", chirality_weight=10.0)
-    loss_a, raw_mf_a, raw_fm_a, raw_chir_a = _run_single_noise_loss(
+    loss_a, raw_mf_a, raw_fm_a, raw_chir_a, _ = _run_single_noise_loss(
         trainer_a, x_1, mask, t_values)
 
     # Run B: chirality weight=0 so chirality contribution is zero regardless.
     trainer_b, x_1_b, mask_b = _make_mirror_trainer(
         B=B, n=n, t_gate_max=1.0, t_gate_mode="hard", chirality_weight=0.0)
     trainer_b.chirality_loss_enabled = False  # further skip branch entirely
-    loss_b, raw_mf_b, raw_fm_b, raw_chir_b = _run_single_noise_loss(
+    loss_b, raw_mf_b, raw_fm_b, raw_chir_b, _ = _run_single_noise_loss(
         trainer_b, x_1_b, mask_b, t_values)
 
     # Chirality contribution zero in both cases.

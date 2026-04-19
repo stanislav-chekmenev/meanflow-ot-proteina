@@ -99,6 +99,12 @@ def _make_fake_trainer(norm_p, norm_eps=1e-3, chir_weight=1.0, chir_enabled=True
     trainer.chirality_loss_weight = chir_weight
     trainer.chirality_margin_alpha = 0.1
     trainer.chirality_stride = 1
+    # t-gate knobs (from hyp/t-gate-chir): t_gate_max=1.0 + hard is the
+    # identity gate, so the chirality hinge behaves exactly as it did
+    # pre-t-gate. These tests intentionally leave the gate open so they
+    # isolate the adp_wt scaling behaviour.
+    trainer.chirality_t_gate_max = 1.0
+    trainer.chirality_t_gate_mode = "hard"
     trainer.self_cond_prob = 0.0
     # Bind the real methods from the class to the fake instance.
     trainer.adaptive_loss = ModelTrainerBase.adaptive_loss.__get__(trainer)
