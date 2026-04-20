@@ -50,6 +50,7 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
+    noise_samples: 128
   meanflow:
     ratio: 0.25
     P_mean_t: -0.4
@@ -69,6 +70,8 @@ training:
 
 opt:
   lr: 0.0001
+  init_lr: 0.0  # Starting LR at the beginning of warmup (0 = warmup from zero)
+  end_lr: 0.0  # Minimum LR after decay (0 = decay all the way to zero)
   warmup_steps: 0  # Number of linear warmup steps (0 = no warmup)
   lr_decay_total_steps: 0  # Total steps for warmup + linear decay schedule (0 = constant LR)
   max_epochs: 10000000
@@ -86,7 +89,7 @@ log:
   log_wandb: True  # whether to log to wandb
   checkpoint: True  # whether to store checkpoints
   checkpoint_every_n_steps: 10000  # How often we store a checkpoint, should be greater than val_check_interval above
-  last_ckpt_every_n_steps: 3500  # How often do we update our last ckpt, needed for requeuing without losing progress
+  last_ckpt_every_n_steps: 3000  # How often do we update our last ckpt, needed for requeuing without losing progress
 
 seed: 42
 
@@ -95,3 +98,8 @@ ema:
   validate_original_weights: False  # Whether to run validation on regular or EMA weights
   every_n_steps: 1  # Frequency of EMA updates
   cpu_offload: False  # Whether to offload EMA weights to cpu
+
+eval:
+  enabled: True           # Periodic ProteinEvalCallback (unconditional generation + viz)
+  val_enabled: False       # ProteinValEvalCallback over first n_val_proteins of the val set
+  n_val_proteins: 16       # How many val proteins to track in ProteinValEvalCallback

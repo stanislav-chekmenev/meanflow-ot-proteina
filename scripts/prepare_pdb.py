@@ -63,7 +63,7 @@ def main() -> None:
             config_name="pdb_train",
             overrides=[
                 f"datamodule.dataselector.fraction={args.fraction}",
-                "datamodule.dataselector.num_workers=16",
+                "datamodule.num_workers=16",
             ],
         )
 
