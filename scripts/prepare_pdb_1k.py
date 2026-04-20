@@ -86,12 +86,11 @@ def main() -> None:
     train_size = len(dm.train_ds)
     val_size = len(dm.val_ds)
     # test_ds is only created for stage='test'; estimate from dfs_splits if available
-    if hasattr(dm, "test_ds"):
+    if dm.test_ds is not None:
         test_size = len(dm.test_ds)
-    elif dm.dfs_splits is not None and len(dm.dfs_splits) > 2:
-        test_size = len(dm.dfs_splits[2])
     else:
-        test_size = None
+        test_split = dm.dfs_splits.get("test") if dm.dfs_splits is not None else None
+        test_size = len(test_split) if test_split is not None else None
 
     logger.info("Dataset ready.")
     print(f"\nDataset summary")
