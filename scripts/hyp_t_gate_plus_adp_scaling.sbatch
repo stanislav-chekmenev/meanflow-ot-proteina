@@ -103,15 +103,15 @@ OT_COUPLING_ENABLED=False
 # Combined hypothesis: norm_p=1 activates adp_wt scaling on both the MF
 # loss (existing behaviour) AND the chirality hinge (adp-wt-scaling fix,
 # applied AFTER the t-gate per gate-then-scale ordering).
-MEANFLOW_NORM_P=1
+MEANFLOW_NORM_P=0
 NCPUS_PER_TASK_TRAIN=16
 NCPUS_PER_TASK_PREPRO=2
 NOISE_SAMPLES=0
 LOSS_ACCUMULATION_STEPS=1
 # Guardrail #4: datamodule.repeat=2, batch_size=2, max_epochs=20000 unchanged.
-MAX_EPOCHS=20000
+MAX_EPOCHS=13000
 WARMUP_STEPS=1000
-LR_DECAY_TOTAL_STEPS=23000
+LR_DECAY_TOTAL_STEPS=13000
 INIT_LR=1e-6
 END_LR=5e-6
 LR=1.e-4
@@ -124,7 +124,7 @@ SELF_COND_PROB=0.0
 # Chirality hinge loss — ENABLED, t-gated to low-t AND adp_wt-scaled.
 CHIRALITY_ENABLED=True
 CHIRALITY_WEIGHT=1.0
-CHIRALITY_MARGIN_ALPHA=0.1
+CHIRALITY_MARGIN_ALPHA=0.5
 CHIRALITY_STRIDE=1
 # Hypothesis knob from t-gate-chir: gate off chirality for t >= 0.3 (hard
 # indicator gate). x_1_pred = z - t*v is noise-dominated at high t, so the
@@ -132,7 +132,7 @@ CHIRALITY_STRIDE=1
 # The gate fires first; the adp_wt division then rescales the (already
 # masked) hinge so its gradient stays at the same scale as MF under
 # norm_p > 0.
-CHIRALITY_T_GATE_MAX=0.3
+CHIRALITY_T_GATE_MAX=0.7
 CHIRALITY_T_GATE_MODE=hard
 
 # Dataset config (pdb_debug.yaml)
