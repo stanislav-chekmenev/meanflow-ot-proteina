@@ -48,6 +48,7 @@ from proteinfoundation.utils.training_analysis_utils import (
     StartupInfoCallback,
 )
 from proteinfoundation.callbacks.protein_eval import ProteinEvalCallback
+from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
 
 
 # Things that should only be done by a single process
@@ -271,6 +272,12 @@ if __name__ == "__main__":
                 ground_truth_pdb_path=gt_path,
                 nsamples=eval_nsamples,
             )
+        )
+
+    if eval_cfg is not None and eval_cfg.get("val_enabled", False) and wandb_logger is not None:
+        n_val = int(eval_cfg.get("n_val_proteins", 16))
+        callbacks.append(
+            ProteinValEvalCallback(run_name=run_name, n_val_proteins=n_val)
         )
 
     log_info(f"Using EMA with decay {cfg_exp.ema.decay}")
