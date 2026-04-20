@@ -90,6 +90,10 @@ class ProteinValEvalCallback(Callback):
             gt_ca = graph.coords[:, _CA_INDEX, :][ca_mask].cpu().numpy()  # [m, 3]
             n_res = gt_ca.shape[0]
 
+            if n_res == 0:
+                logger.warning(f"Skipping val protein {pid}: no valid CA atoms")
+                continue
+
             # Write GT CA-only PDB.
             atom37 = np.zeros((n_res, 37, 3), dtype=np.float32)
             atom37[:, _CA_INDEX, :] = gt_ca
@@ -105,6 +109,13 @@ class ProteinValEvalCallback(Callback):
                 }
             )
             gt_log_dict[f"val/{pid}/gt"] = wandb.Molecule(gt_path)
+
+        if not proteins:
+            logger.warning(
+                "ProteinValEvalCallback: no valid val proteins found (all had n_res=0);"
+                " will retry on next val round"
+            )
+            return
 
         self._val_proteins = proteins
 

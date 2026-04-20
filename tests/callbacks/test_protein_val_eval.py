@@ -179,6 +179,43 @@ class TestProteinValEvalCallback:
             "_val_proteins list object should not be replaced on second call"
         )
 
+    def test_zero_mask_protein_skipped(self, tmp_path):
+        """Middle protein with all-False CA mask is skipped; no crash; warning logged."""
+        from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
+
+        # Build 3 proteins; zero out CA mask for the middle one.
+        graphs = _make_val_ds(n_proteins=3, n_res_list=[10, 8, 12])
+        graphs[1].coord_mask[:, 1] = torch.zeros(8, dtype=torch.bool)
+
+        trainer = _make_trainer(graphs, global_step=42)
+        pl_module = _make_pl_module(10)
+
+        cb = ProteinValEvalCallback(run_name="test_zero_mask", n_val_proteins=3)
+        cb._tmp_dir = str(tmp_path)
+
+        warning_calls = []
+
+        with (
+            mock.patch("proteinfoundation.callbacks.protein_val_eval.wandb.log"),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
+                return_value="fake-mol",
+            ),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.logger.warning",
+                side_effect=lambda msg, *a, **kw: warning_calls.append(msg),
+            ),
+        ):
+            cb.on_validation_epoch_end(trainer, pl_module)
+
+        # Middle protein must have been skipped.
+        assert cb._val_proteins is not None
+        assert len(cb._val_proteins) == 2
+
+        # A warning must have been logged for the skipped protein.
+        all_warnings = " ".join(warning_calls).lower()
+        assert "skipping val protein" in all_warnings
+
     def test_wandb_log_called_with_aggregate_keys(self, tmp_path):
         """The per-round wandb.log call must contain the aggregate scalar keys."""
         from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
