@@ -97,11 +97,20 @@ class ProteinEvalCallback(Callback):
         n_residues: int,
         run_name: str,
         ground_truth_pdb_path: str = None,
+        nsamples: int = 1,
     ):
         super().__init__()
         self.eval_every_n_steps = eval_every_n_steps
         self.n_residues = n_residues
         self.ground_truth_pdb_path = ground_truth_pdb_path
+        # nsamples: number of generations to draw per eval call. Per-sample
+        # RMSDs and chirality are averaged so the logged metric is
+        # lower-variance; in particular mean-chirality becomes a real-valued
+        # estimator in [-1, +1] rather than a 1-bit Bernoulli sample (memory
+        # note #3 in project_debug_meanflow_1ubq_analysis.md). nsamples=1
+        # preserves the original 1-bit chirality behaviour.
+        assert nsamples >= 1, f"nsamples must be >= 1, got {nsamples}"
+        self.nsamples = int(nsamples)
 
         # Guards ----------------------------------------------------------
         # Tracks the last global_step at which we ran eval so that we do not
@@ -247,7 +256,8 @@ class ProteinEvalCallback(Callback):
         return loss_orig, loss_mirror, abs(loss_orig - loss_mirror)
 
     def _generate_and_save(self, pl_module, step, label, nsteps, use_fm_euler=False):
-        """Generate a protein, save PDB, compute RMSD vs GT.
+        """Generate ``self.nsamples`` proteins, save the first PDB, and
+        aggregate RMSD / chirality over the batch.
 
         Args:
             pl_module: the Proteina LightningModule.
@@ -257,38 +267,57 @@ class ProteinEvalCallback(Callback):
             use_fm_euler: if True, use FM-style ODE (h=0) instead of MeanFlow.
 
         Returns:
-            Tuple (pdb_path, rmsd_or_None).
+            Tuple (pdb_path, rmsd, rmsd_reflected, chirality).
+            - rmsd / rmsd_reflected are the mean over ``self.nsamples``.
+            - chirality is the MEAN of per-sample signs in [-1, +1] — reducing
+              the 1-bit artifact at ``nsamples=1`` to a continuous signal that
+              can discriminate slow drift.
+            Values are ``None`` when no GT is available.
         """
+        nsamples = self.nsamples
         with torch.no_grad():
             if use_fm_euler:
                 samples = pl_module.generate_fm_euler(
-                    nsamples=1, n=self.n_residues, nsteps=nsteps
+                    nsamples=nsamples, n=self.n_residues, nsteps=nsteps
                 )
             else:
                 samples = pl_module.generate(
-                    nsamples=1, n=self.n_residues, nsteps=nsteps
+                    nsamples=nsamples, n=self.n_residues, nsteps=nsteps
                 )
-            atom37 = pl_module.samples_to_atom37(samples)  # [1, n, 37, 3]
+            atom37 = pl_module.samples_to_atom37(samples)  # [nsamples, n, 37, 3]
 
-        # Write PDB
+        # Write PDB for the FIRST sample (keeps the WandB 3-D Molecule
+        # visualisation intact regardless of ``nsamples``).
         pdb_path = os.path.join(self._tmp_dir, f"generated_{label}_step{step}.pdb")
-        atom37_np = atom37[0].cpu().numpy()
-        write_prot_to_pdb(atom37_np, pdb_path, overwrite=True, no_indexing=True)
+        atom37_np = atom37.cpu().numpy()
+        write_prot_to_pdb(atom37_np[0], pdb_path, overwrite=True, no_indexing=True)
 
-        # Compute RMSD vs ground truth, plus chirality metrics
+        # Compute RMSD vs ground truth, plus chirality metrics, averaged
+        # over the nsamples generated samples.
         rmsd = None
         rmsd_reflected = None
         chirality = None
         gt_ca = self._get_gt_ca_coords()
         if gt_ca is not None:
-            gen_ca = atom37_np[:, _CA_INDEX, :]  # [n, 3]
-            n_common = min(len(gt_ca), len(gen_ca))
-            if n_common > 0:
+            rmsds = []
+            rmsds_refl = []
+            chirs = []
+            for b in range(atom37_np.shape[0]):
+                gen_ca = atom37_np[b, :, _CA_INDEX, :]  # [n, 3]
+                n_common = min(len(gt_ca), len(gen_ca))
+                if n_common <= 0:
+                    continue
                 gen_c = gen_ca[:n_common]
                 gt_c = gt_ca[:n_common]
-                rmsd = _ca_rmsd(gen_c, gt_c)
-                rmsd_reflected = _ca_rmsd_with_reflection(gen_c, gt_c)
-                chirality = _chirality_sign(gen_c, gt_c)
+                rmsds.append(_ca_rmsd(gen_c, gt_c))
+                rmsds_refl.append(_ca_rmsd_with_reflection(gen_c, gt_c))
+                chirs.append(_chirality_sign(gen_c, gt_c))
+            if rmsds:
+                rmsd = float(np.mean(rmsds))
+                rmsd_reflected = float(np.mean(rmsds_refl))
+                # Mean over +-1 flags -> real-valued estimator in [-1, +1];
+                # preserves the single-sample semantics at nsamples=1 (still ±1).
+                chirality = float(np.mean(chirs))
 
         return pdb_path, rmsd, rmsd_reflected, chirality
 
@@ -378,12 +407,13 @@ class ProteinEvalCallback(Callback):
                 self._gt_logged = True
 
             # Summary: "R" = proper-rotation RMSD, "R*" = reflection allowed,
-            # "c" = chirality (+ = same as GT, - = mirror).
+            # "c" = mean chirality over nsamples generations (float in [-1, +1];
+            # +1 = all correct, -1 = all mirrored, 0 = 50/50 split).
             def _fmt(label, rmsd, rmsd_refl, chir):
                 if rmsd is None:
                     return None
-                sign = "+" if chir == 1 else "-"
-                return f"{label}: R={rmsd:.2f} R*={rmsd_refl:.2f} c={sign}"
+                chir_str = f"{chir:+.2f}" if chir is not None else "NA"
+                return f"{label}: R={rmsd:.2f} R*={rmsd_refl:.2f} c={chir_str}"
 
             parts = [f"eval @ step {step}"]
             for line in [

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mf_debug
+#SBATCH --job-name=hyp_t_gate_plus_adp_scaling
 #SBATCH --partition=gpu
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:rtx6000:1
@@ -8,27 +8,37 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=48G
 #SBATCH --time=0-04:00:00
-#SBATCH --output=logs/train_debug_%j.out
-#SBATCH --error=logs/train_debug_%j.err
+#SBATCH --output=logs/hyp_t_gate_plus_adp_scaling_%j.out
+#SBATCH --error=logs/hyp_t_gate_plus_adp_scaling_%j.err
 
 echo "==========================================="
 echo "Job started: $(date)"
 echo "Running on: $(hostname)"
 echo "Job ID: $SLURM_JOB_ID"
 echo "GPU devices: $CUDA_VISIBLE_DEVICES"
+echo "Hypothesis: t-gate-plus-adp-scaling — compose t-gate (chirality hinge"
+echo "            restricted to low-t) with adp_wt rescaling of the hinge"
+echo "            under norm_p>0 so MF/chirality gradients stay at the same"
+echo "            scale. Order is gate-then-scale: if the gate zeros the"
+echo "            hinge on a batch, chirality contributes 0 regardless of"
+echo "            norm_p."
 echo "==========================================="
 
 # --- Environment ---
-PROJECT_ROOT="/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina"
+# REPO_ROOT is the primary repo (shared venv tarball, data, logs).
+# CODE_ROOT is this hypothesis's git worktree — configs and code come from
+# the hypothesis branch so the run picks up branch-specific changes.
+REPO_ROOT="/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina"
+CODE_ROOT="$REPO_ROOT/.claude/worktrees/agent-merge-tgate-adp"
 DATA_ROOT="/netscratch/schekmenev"
 
 # Unpack .venv to scratch (once per node, skips if already present)
 # Create tarball on login node:
 #   uv venv --relocatable --python 3.11 && uv sync
-#   tar czf "$PROJECT_ROOT/venv.tar.gz" -C "$PROJECT_ROOT" .venv
-PROJECT_NAME="$(basename "$PROJECT_ROOT")"
-ENV_TARBALL="$PROJECT_ROOT/venv.tar.gz"
-ENV_LOCAL="$DATA_ROOT/venvs/$PROJECT_NAME/.venv"    
+#   tar czf "$REPO_ROOT/venv.tar.gz" -C "$REPO_ROOT" .venv
+PROJECT_NAME="$(basename "$REPO_ROOT")"
+ENV_TARBALL="$REPO_ROOT/venv.tar.gz"
+ENV_LOCAL="$DATA_ROOT/venvs/$PROJECT_NAME/.venv"
 
 echo "Setting up virtual environment on node-local scratch..."
 # Version check: re-extract only when tarball has changed (compare mtime stamp)
@@ -54,19 +64,21 @@ export PATH="$ENV_LOCAL/bin:$PATH"
 
 echo "Virtual environment set up at $ENV_LOCAL"
 
-# Ensure project is importable
-export PYTHONPATH="${PYTHONPATH:-}:$PROJECT_ROOT"
+# Ensure project is importable — use CODE_ROOT so imports resolve to the
+# hypothesis-branch code, not the primary repo's main branch.
+export PYTHONPATH="${PYTHONPATH:-}:$CODE_ROOT"
 export PYTHONUNBUFFERED=1
 
-# DATA_PATH env var — configs resolve ${oc.env:DATA_PATH}/debug/
-export DATA_PATH="$PROJECT_ROOT/data"
+# DATA_PATH env var — configs resolve ${oc.env:DATA_PATH}/debug/.
+# Data lives in REPO_ROOT (shared across worktrees).
+export DATA_PATH="$REPO_ROOT/data"
 
-mkdir -p "$PROJECT_ROOT/logs"
+mkdir -p "$REPO_ROOT/logs"
 
 # --- Prepare debug data (if not already done) ---
 if [ ! -f "$DATA_PATH/debug/processed/1ubq.pt" ]; then
     echo "Processing debug protein..."
-    python "$PROJECT_ROOT/scripts/prepare_debug_data.py"
+    python "$CODE_ROOT/scripts/prepare_debug_data.py"
 fi
 
 # --- NCCL (single-GPU, but keep for consistency) ---
@@ -77,39 +89,68 @@ export NCCL_SHM_DISABLE=0
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca_debug.yaml)
-EXP_NAME="meanflow-base-p0-bs2" 
-ACCUMULATE_GRAD_BATCHES=10
+EXP_NAME="hyp-t-gate-plus-adp-scaling"
+
+# Guardrail #1: accumulate_grad_batches=1 matches reality on 1-micro-batch/epoch.
+ACCUMULATE_GRAD_BATCHES=1
+# Guardrail #2: eval at nsamples=16 so chirality is a mean in [-1, +1] rather
+# than a 1-bit Bernoulli sample. Reducer in protein_eval.py averages across
+# the batch.
+EVAL_NSAMPLES=16
+
 EVAL_EVERY_N_STEPS=250
 OT_COUPLING_ENABLED=False
+# Combined hypothesis: norm_p=1 activates adp_wt scaling on both the MF
+# loss (existing behaviour) AND the chirality hinge (adp-wt-scaling fix,
+# applied AFTER the t-gate per gate-then-scale ordering).
 MEANFLOW_NORM_P=0
 NCPUS_PER_TASK_TRAIN=16
 NCPUS_PER_TASK_PREPRO=2
 NOISE_SAMPLES=0
 LOSS_ACCUMULATION_STEPS=1
-MAX_EPOCHS=20000
+# Guardrail #4: datamodule.repeat=2, batch_size=2, max_epochs=20000 unchanged.
+MAX_EPOCHS=13000
 WARMUP_STEPS=1000
-LR_DECAY_TOTAL_STEPS=23000
+LR_DECAY_TOTAL_STEPS=13000
 INIT_LR=1e-6
 END_LR=5e-6
 LR=1.e-4
 
-# Self-conditioning
+# Self-conditioning — disabled so this run isolates the combined
+# t-gate + adp-wt-scaling effect.
 SELF_COND=False
-SELF_COND_PROB=0.5
+SELF_COND_PROB=0.0
 
-# Chirality hinge loss
+# Chirality hinge loss — ENABLED, t-gated to low-t AND adp_wt-scaled.
 CHIRALITY_ENABLED=True
 CHIRALITY_WEIGHT=1.0
-CHIRALITY_MARGIN_ALPHA=0.1
+CHIRALITY_MARGIN_ALPHA=0.5
 CHIRALITY_STRIDE=1
+# Hypothesis knob from t-gate-chir: gate off chirality for t >= 0.3 (hard
+# indicator gate). x_1_pred = z - t*v is noise-dominated at high t, so the
+# hinge there is high-variance/low-signal and crushes the MF gradient.
+# The gate fires first; the adp_wt division then rescales the (already
+# masked) hinge so its gradient stays at the same scale as MF under
+# norm_p > 0.
+CHIRALITY_T_GATE_MAX=0.7
+CHIRALITY_T_GATE_MODE=hard
 
 # Dataset config (pdb_debug.yaml)
 DATAMODULE_REPEAT=2
 DATAMODULE_BATCH_SIZE=2
 
 # --- Run training ---
-echo "Starting MeanFlow debug training..."
-srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
+echo "Starting MeanFlow training for hypothesis t-gate-plus-adp-scaling..."
+echo "Guardrails: accum=$ACCUMULATE_GRAD_BATCHES, eval_nsamples=$EVAL_NSAMPLES, norm_p=$MEANFLOW_NORM_P"
+echo "t-gate: t_gate_max=$CHIRALITY_T_GATE_MAX, t_gate_mode=$CHIRALITY_T_GATE_MODE"
+echo "adp-wt: norm_p=$MEANFLOW_NORM_P applied to both MF loss and gated chirality hinge"
+
+# cd into CODE_ROOT so Python's implicit sys.path[0] (cwd) matches the
+# worktree. Otherwise 'import proteinfoundation' resolves to whichever
+# directory sbatch was submitted from — typically the primary repo on
+# main, which silently bypasses all hypothesis-branch code.
+cd "$CODE_ROOT"
+srun python "$CODE_ROOT/proteinfoundation/train.py" \
     --config_name training_ca_debug \
     --single \
     --show_prog_bar \
@@ -123,6 +164,7 @@ srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
         opt.init_lr=$INIT_LR \
         opt.end_lr=$END_LR \
         eval.every_n_steps=$EVAL_EVERY_N_STEPS \
+        eval.nsamples=$EVAL_NSAMPLES \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
@@ -135,6 +177,8 @@ srun python "$PROJECT_ROOT/proteinfoundation/train.py" \
         training.chirality_loss.weight=$CHIRALITY_WEIGHT \
         training.chirality_loss.margin_alpha=$CHIRALITY_MARGIN_ALPHA \
         training.chirality_loss.stride=$CHIRALITY_STRIDE \
+        training.chirality_loss.t_gate_max=$CHIRALITY_T_GATE_MAX \
+        training.chirality_loss.t_gate_mode=$CHIRALITY_T_GATE_MODE \
     --data_overrides \
         datamodule.repeat=$DATAMODULE_REPEAT \
         datamodule.batch_size=$DATAMODULE_BATCH_SIZE

@@ -54,6 +54,33 @@ def _triple_mask(mask: Bool[Tensor, "b n"], stride: int) -> Bool[Tensor, "b m"]:
     )
 
 
+def chirality_hinge_loss_per_sample(
+    x_pred: Float[Tensor, "b n 3"],
+    x_gt: Float[Tensor, "b n 3"],
+    mask: Bool[Tensor, "b n"],
+    margin_alpha: float = 0.1,
+    stride: int = 1,
+) -> Float[Tensor, "b"]:
+    """Per-sample chirality hinge loss (sum of per-element hinges / per-sample
+    valid count). Same math as :func:`chirality_hinge_loss`, but without the
+    cross-batch reduction — lets callers apply per-sample weights (e.g., a
+    t-gate) before averaging.
+
+    Returns:
+        Tensor of shape [B] with per-sample mean hinge loss.
+    """
+    T_gt = triple_products(x_gt, stride=stride)
+    T_pred = triple_products(x_pred, stride=stride)
+    valid = _triple_mask(mask, stride=stride)
+
+    m_T = margin_alpha * T_gt.abs()
+    signed_agreement = torch.sign(T_gt) * T_pred
+    hinge = torch.relu(m_T - signed_agreement) * valid  # [B, m]
+
+    per_sample_count = valid.sum(dim=-1).clamp(min=1).to(T_gt.dtype)  # [B]
+    return hinge.sum(dim=-1) / per_sample_count  # [B]
+
+
 def chirality_hinge_loss(
     x_pred: Float[Tensor, "b n 3"],
     x_gt: Float[Tensor, "b n 3"],
