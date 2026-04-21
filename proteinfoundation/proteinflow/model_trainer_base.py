@@ -460,13 +460,13 @@ class ModelTrainerBase(L.LightningModule):
 
         Args:
             batch: Data batch.
-            val_step: If True, logs under "validation_loss" prefix and skips
+            val_step: If True, logs under "val" prefix and skips
                 scaling stats. Validation always uses K=1 (single noise sample).
 
         Returns:
             Training loss (scalar) for K=1/automatic optimization, or None for K>1/manual.
         """
-        log_prefix = "validation_loss" if val_step else "train"
+        log_prefix = "val" if val_step else "train"
 
         assert not self.motif_conditioning, (
             "Motif conditioning is not yet supported with MeanFlow training. "
