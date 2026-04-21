@@ -36,7 +36,61 @@ class OTPool:
         return self._cursor >= self.pool_size
 
     def refill(self, dataset, fm, extract_clean_sample) -> None:
-        raise NotImplementedError  # Task 2
+        """Sample K proteins + K noise, run Hungarian, store pool on CPU.
+
+        Args:
+            dataset: a dataset with __len__ and __getitem__ returning batch dicts.
+            fm: flow matcher with _mask_and_zero_com(x, mask).
+            extract_clean_sample: callable(batch) -> (x_1, mask, bshape, n, dtype).
+        """
+        import scipy.optimize
+        from proteinfoundation.utils.dense_padding_data_loader import (
+            dense_padded_from_data_list,
+        )
+
+        K = self.pool_size
+
+        # 1. Sample K random dataset indices -> load and collate into a batch.
+        idx = torch.randint(0, len(dataset), (K,))
+        data_list = [dataset[int(i)] for i in idx]
+        batch = dense_padded_from_data_list(data_list)
+
+        # 2. Extract CA coords + masks via the same path Proteina uses.
+        x_1_pool, mask_pool, _, _, dtype = extract_clean_sample(batch)
+        x_1_pool = fm._mask_and_zero_com(x_1_pool, mask_pool)
+        x_1_pool = x_1_pool.detach().cpu()
+        mask_pool = mask_pool.cpu()
+
+        N_pool = x_1_pool.shape[1]
+
+        # 3. Sample noise on CPU, mask + zero COM.
+        x_0_pool = torch.randn(K, N_pool, self.dim, dtype=dtype) * self.scale_ref
+        x_0_pool = fm._mask_and_zero_com(x_0_pool, mask_pool)
+
+        # 4. Build K x K cost matrix on flat masked coords.
+        mask_3d = mask_pool[..., None]
+        x_1_flat = (x_1_pool * mask_3d).reshape(K, -1)
+        x_0_flat = (x_0_pool * mask_3d).reshape(K, -1)
+        M = torch.cdist(x_1_flat, x_0_flat) ** 2  # [K, K]
+
+        # 5. Hungarian.
+        _, sigma = scipy.optimize.linear_sum_assignment(M.numpy())
+
+        # 6. Reorder x_0 so (x_1[i], x_0[i]) is the OT pair.
+        sigma_t = torch.as_tensor(sigma, dtype=torch.long)
+        x_0_pool = x_0_pool[sigma_t]
+
+        # 7. Store pool state (all CPU).
+        self._x1 = x_1_pool.contiguous()
+        self._x0 = x_0_pool.contiguous()
+        self._mask = mask_pool.contiguous()
+
+        # 8. Reset cursor + random serving order.
+        self._perm = torch.randperm(self.pool_size)
+        self._cursor = 0
+
+        # 9. Free intermediates.
+        del M, x_1_flat, x_0_flat
 
     def next_batch(self, device):
         raise NotImplementedError  # Task 3
