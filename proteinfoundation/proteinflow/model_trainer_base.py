@@ -273,7 +273,7 @@ class ModelTrainerBase(L.LightningModule):
             return torch.ones_like(loss)
         return (loss.detach() + norm_eps) ** norm_p
 
-    def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B, *, use_sc=False):
+    def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B, *, use_sc=False, x_0_override=None):
         """
         Runs one noise sample through the MeanFlow + FM loss pipeline.
 
@@ -292,6 +292,9 @@ class ModelTrainerBase(L.LightningModule):
                 x_sc and feed it as a detached constant into the JVP and FM
                 sub-passes. Requires the NN config to declare x_sc /
                 x_sc_pair_dists in its feature lists.
+            x_0_override: If not None, use this tensor as x_0 verbatim and
+                skip the internal fresh-noise sampling + B x B OT.
+                Shape must match ``x_1`` ([B, n, 3]).
 
         Returns:
             combined_adp_loss: scalar tensor (requires_grad=True)
@@ -305,14 +308,19 @@ class ModelTrainerBase(L.LightningModule):
         dtype = x_1.dtype
         batch_shape = x_1.shape[:-2]  # (B,)
 
-        # 1. Sample noise
-        x_0 = self.fm.sample_reference(
-            n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
-        )
-        # 2. Standard square-batch OT (when noise_samples pool is NOT active)
-        if self.ot_sampler is not None:
-            ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_1, x_0, mask)
-            x_0 = x_0[ot_noise_idx]
+        if x_0_override is not None:
+            # Pool mode: x_0 is pre-paired with x_1 via the K x K Hungarian
+            # in OTPool.refill. Skip fresh-noise sampling and B x B OT.
+            x_0 = x_0_override
+        else:
+            # 1. Sample noise
+            x_0 = self.fm.sample_reference(
+                n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
+            )
+            # 2. Standard square-batch OT (when pool is NOT active)
+            if self.ot_sampler is not None:
+                ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_1, x_0, mask)
+                x_0 = x_0[ot_noise_idx]
 
         # 3. Interpolate: z_t = (1-t)*x_1 + t*x_0 (paper convention)
         z = (1 - t_ext) * x_1 + t_ext * x_0

@@ -211,3 +211,18 @@ def test_next_batch_moves_to_device_but_pool_stays_cpu():
         x1c, x0c, mc, _, _, _ = pool.next_batch("cuda")
         assert x1c.device.type == "cuda"
         assert pool._x1.device.type == "cpu"
+
+
+# --- Task 5: x_0_override signature test ----------------------------------
+
+
+def test_compute_single_noise_loss_accepts_x0_override():
+    """_compute_single_noise_loss should use x_0_override verbatim when provided."""
+    import inspect
+    from proteinfoundation.proteinflow.model_trainer_base import ModelTrainerBase
+    sig = inspect.signature(ModelTrainerBase._compute_single_noise_loss)
+    assert "x_0_override" in sig.parameters, (
+        "ModelTrainerBase._compute_single_noise_loss must accept x_0_override"
+    )
+    # Default should be None (backwards-compat with non-pool path).
+    assert sig.parameters["x_0_override"].default is None
