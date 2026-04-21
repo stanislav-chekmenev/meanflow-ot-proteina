@@ -42,10 +42,17 @@ def _make_trainer(val_ds, global_rank=0, global_step=100, sanity_checking=False)
     return trainer
 
 
-def _make_pl_module(n_res):
-    """Return a MagicMock pl_module whose generate/samples_to_atom37 return zeros."""
+def _make_pl_module(n_res, experiment_log=None):
+    """Return a MagicMock pl_module whose generate/samples_to_atom37 return zeros.
+
+    If ``experiment_log`` is provided, it is installed as the
+    ``pl_module.logger.experiment.log`` callable so tests can assert on the
+    arguments passed to the WandB logger.
+    """
     pl_module = mock.MagicMock()
     pl_module.training = False
+    if experiment_log is not None:
+        pl_module.logger.experiment.log = experiment_log
 
     def fake_generate(nsamples, n, nsteps, mask=None):
         return torch.zeros(nsamples, n, 3)
@@ -68,7 +75,11 @@ def _make_pl_module(n_res):
 class TestProteinValEvalCallback:
 
     def test_lazy_init_caches_val_proteins(self, tmp_path):
-        """Lazy init caches n_val_proteins entries and writes GT PDB files."""
+        """Lazy init caches n_val_proteins entries and writes GT PDB files.
+
+        GT molecules are no longer logged during lazy init — they now appear
+        as rows of the per-round `samples/protein_table` wandb.Table.
+        """
         from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
 
         val_ds = _make_val_ds(n_proteins=3, n_res_list=[10, 15, 20])
@@ -85,6 +96,10 @@ class TestProteinValEvalCallback:
                 "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
                 return_value="fake-mol",
             ),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                return_value=mock.MagicMock(),
+            ),
         ):
             cb.on_validation_epoch_end(trainer, pl_module)
 
@@ -97,9 +112,6 @@ class TestProteinValEvalCallback:
             assert os.path.exists(p["gt_pdb_path"]), (
                 f"GT PDB missing: {p['gt_pdb_path']}"
             )
-
-        # GT should have been logged once.
-        assert cb._gt_logged is True
 
     def test_sanity_check_skipped(self, tmp_path):
         """When sanity_checking=True the callback must not touch anything."""
@@ -118,12 +130,15 @@ class TestProteinValEvalCallback:
                 "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
                 return_value="fake-mol",
             ),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                return_value=mock.MagicMock(),
+            ),
         ):
             cb.on_validation_epoch_end(trainer, pl_module)
 
         # Nothing should have been cached or written.
         assert cb._val_proteins is None
-        assert cb._gt_logged is False
         assert list(tmp_path.iterdir()) == []
         mock_log.assert_not_called()
 
@@ -144,11 +159,14 @@ class TestProteinValEvalCallback:
                 "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
                 return_value="fake-mol",
             ),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                return_value=mock.MagicMock(),
+            ),
         ):
             cb.on_validation_epoch_end(trainer, pl_module)
 
         assert cb._val_proteins is None
-        assert cb._gt_logged is False
         mock_log.assert_not_called()
 
     def test_second_call_skips_reinit(self, tmp_path):
@@ -167,6 +185,10 @@ class TestProteinValEvalCallback:
             mock.patch(
                 "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
                 return_value="fake-mol",
+            ),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                return_value=mock.MagicMock(),
             ),
         ):
             cb.on_validation_epoch_end(trainer, pl_module)
@@ -202,6 +224,10 @@ class TestProteinValEvalCallback:
                 return_value="fake-mol",
             ),
             mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                return_value=mock.MagicMock(),
+            ),
+            mock.patch(
                 "proteinfoundation.callbacks.protein_val_eval.logger.warning",
                 side_effect=lambda msg, *a, **kw: warning_calls.append(msg),
             ),
@@ -217,37 +243,72 @@ class TestProteinValEvalCallback:
         assert "skipping val protein" in all_warnings
 
     def test_wandb_log_called_with_aggregate_keys(self, tmp_path):
-        """The per-round wandb.log call must contain the aggregate scalar keys."""
+        """The per-round log call must contain the aggregate scalar keys plus
+        a `samples/protein_table` wandb.Table, must NOT include any per-protein
+        molecule keys, and must NOT pass an explicit ``step=`` (that would
+        break the ``trainer/global_step`` step_metric alignment set in
+        train.py)."""
         from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
 
         n_res_list = [8, 12]
         val_ds = _make_val_ds(n_proteins=2, n_res_list=n_res_list)
         trainer = _make_trainer(val_ds, global_step=50)
-        pl_module = _make_pl_module(8)
+
+        logged_calls = []
+
+        def capture_log(d, *args, **kwargs):
+            logged_calls.append((dict(d), kwargs))
+
+        pl_module = _make_pl_module(8, experiment_log=capture_log)
+        # GT is no longer logged via trainer.logger during lazy init, but keep
+        # a safety net: if _init_val_proteins ever calls logger.experiment.log
+        # again it will get recorded here and blow the count assertion.
+        trainer.logger.experiment.log = capture_log
 
         cb = ProteinValEvalCallback(run_name="test_keys", n_val_proteins=2)
         cb._tmp_dir = str(tmp_path)
 
-        logged_dicts = []
+        # Mock wandb.Table so we can verify the columns and the number of rows
+        # added, independent of the real wandb runtime.
+        class _FakeTable:
+            def __init__(self, columns=None):
+                self.columns = columns
+                self.rows = []
 
-        def capture_log(d, step=None):
-            logged_dicts.append(dict(d))
+            def add_data(self, *args):
+                self.rows.append(args)
+
+        fake_table_instances = []
+
+        def _table_factory(*args, **kwargs):
+            t = _FakeTable(columns=kwargs.get("columns"))
+            fake_table_instances.append(t)
+            return t
 
         with (
-            mock.patch(
-                "proteinfoundation.callbacks.protein_val_eval.wandb.log",
-                side_effect=capture_log,
-            ),
             mock.patch(
                 "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
                 return_value="fake-mol",
             ),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                side_effect=_table_factory,
+            ),
         ):
             cb.on_validation_epoch_end(trainer, pl_module)
 
-        # First log call is GT; second is per-round metrics.
-        assert len(logged_dicts) == 2
-        round_dict = logged_dicts[1]
+        # Only the per-round metrics log call should happen — GT is no longer
+        # logged separately.
+        assert len(logged_calls) == 1, (
+            f"Expected exactly 1 log call (per-round); got {len(logged_calls)}"
+        )
+        round_dict, kwargs = logged_calls[0]
+        assert "step" not in kwargs, (
+            "log must not pass explicit step= (would desync with "
+            "trainer/global_step step_metric)"
+        )
+
+        # All existing aggregate scalar keys must still be present.
         for key in [
             "val/rmsd_mf1",
             "val/rmsd_mf10x",
@@ -257,4 +318,39 @@ class TestProteinValEvalCallback:
             "val/chirality_mf10x",
             "trainer/global_step",
         ]:
-            assert key in round_dict, f"Missing key in wandb log: {key}"
+            assert key in round_dict, f"Missing key in log: {key}"
+
+        # New: samples/protein_table must be present and must be a wandb.Table
+        # (our _FakeTable stands in for the mocked wandb.Table return value).
+        assert "samples/protein_table" in round_dict, (
+            "Missing key in log: samples/protein_table"
+        )
+        table = round_dict["samples/protein_table"]
+        assert isinstance(table, _FakeTable), (
+            f"samples/protein_table must be a wandb.Table; got {type(table)!r}"
+        )
+        assert table.columns == [
+            "protein_id",
+            "rmsd_mf1",
+            "rmsd_mf10x",
+            "rmsd_reflected_mf1",
+            "rmsd_reflected_mf10x",
+            "ground_truth",
+            "mf1",
+            "mf10x",
+        ], f"Unexpected column order: {table.columns!r}"
+        assert len(table.rows) == 2, (
+            f"Expected 2 rows (one per val protein); got {len(table.rows)}"
+        )
+
+        # No per-protein val/<pid>/* molecule keys must appear in the log.
+        per_protein_keys = [
+            k
+            for k in round_dict
+            if k.startswith("val/")
+            and k.endswith(("/gt", "/mf1", "/mf10x"))
+        ]
+        assert per_protein_keys == [], (
+            f"Per-protein molecule keys should be gone, but found: "
+            f"{per_protein_keys}"
+        )

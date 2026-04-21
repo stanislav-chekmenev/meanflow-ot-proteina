@@ -68,18 +68,19 @@ class ProteinValEvalCallback(Callback):
 
         # Cache: populated on first real validation round.
         self._val_proteins = None  # list of dicts once populated
-        self._gt_logged = False
 
     # ------------------------------------------------------------------
     def _init_val_proteins(self, trainer):
         """Populate self._val_proteins from the val dataset and write GT PDBs.
 
-        Called once on the first real on_validation_epoch_end.
+        Called once on the first real on_validation_epoch_end. GT molecules
+        themselves are not logged here — they are emitted as rows of the
+        per-round `samples/protein_table` wandb.Table in
+        `on_validation_epoch_end`.
         """
         val_ds = trainer.datamodule.val_ds
         n = min(self._n_val_proteins, len(val_ds))
         proteins = []
-        gt_log_dict = {}
 
         for i in range(n):
             graph = val_ds[i]
@@ -108,7 +109,6 @@ class ProteinValEvalCallback(Callback):
                     "gt_pdb_path": gt_path,
                 }
             )
-            gt_log_dict[f"val/{pid}/gt"] = wandb.Molecule(gt_path)
 
         if not proteins:
             logger.warning(
@@ -118,11 +118,6 @@ class ProteinValEvalCallback(Callback):
             return
 
         self._val_proteins = proteins
-
-        # Log GT structures once.
-        gt_log_dict["trainer/global_step"] = trainer.global_step
-        wandb.log(gt_log_dict, step=trainer.global_step)
-        self._gt_logged = True
         logger.info(
             f"ProteinValEvalCallback: initialised {len(proteins)} val proteins"
         )
@@ -230,10 +225,34 @@ class ProteinValEvalCallback(Callback):
 
             # --- Log to wandb in a single batched call ---
             log_dict = {}
+
+            # Build the per-round protein sample table. One row per protein,
+            # with protein_id + aligned RMSDs + three interactive molecule
+            # viewers (GT, MF-1, MF-10x).
+            table = wandb.Table(
+                columns=[
+                    "protein_id",
+                    "rmsd_mf1",
+                    "rmsd_mf10x",
+                    "rmsd_reflected_mf1",
+                    "rmsd_reflected_mf10x",
+                    "ground_truth",
+                    "mf1",
+                    "mf10x",
+                ]
+            )
             for protein, res in zip(self._val_proteins, per_protein_results):
-                pid = protein["id"]
-                log_dict[f"val/{pid}/mf1"] = wandb.Molecule(res["mf1_pdb"])
-                log_dict[f"val/{pid}/mf10x"] = wandb.Molecule(res["mf10x_pdb"])
+                table.add_data(
+                    protein["id"],
+                    float(res["rmsd_mf1"]),
+                    float(res["rmsd_mf10x"]),
+                    float(res["rmsd_refl_mf1"]),
+                    float(res["rmsd_refl_mf10x"]),
+                    wandb.Molecule(protein["gt_pdb_path"]),
+                    wandb.Molecule(res["mf1_pdb"]),
+                    wandb.Molecule(res["mf10x_pdb"]),
+                )
+            log_dict["samples/protein_table"] = table
 
             log_dict["val/rmsd_mf1"] = float(
                 np.mean([r["rmsd_mf1"] for r in per_protein_results])
@@ -254,7 +273,8 @@ class ProteinValEvalCallback(Callback):
                 np.mean([r["chir_mf10x"] for r in per_protein_results])
             )
             log_dict["trainer/global_step"] = step
-            wandb.log(log_dict, step=step)
+            if pl_module.logger is not None:
+                pl_module.logger.experiment.log(log_dict, commit=False)
 
             logger.info(
                 f"ProteinValEvalCallback: logged metrics for "
