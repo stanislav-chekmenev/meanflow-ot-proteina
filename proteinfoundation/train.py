@@ -26,7 +26,7 @@ import loralib as lora
 import torch
 import wandb
 from dotenv import load_dotenv
-from lightning.pytorch.callbacks import LearningRateMonitor
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from lightning.pytorch.utilities import rank_zero_only
 from loguru import logger
@@ -49,6 +49,42 @@ from proteinfoundation.utils.training_analysis_utils import (
 )
 from proteinfoundation.callbacks.protein_eval import ProteinEvalCallback
 from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
+
+
+class GlobalStepWandbLogger(WandbLogger):
+    """WandbLogger that pins the ``trainer/global_step`` x-axis to the real
+    optimizer global_step.
+
+    Lightning's eval loop passes the per-dataloader val-batch counter as the
+    ``step`` argument to ``log_metrics`` (see ``evaluation_loop.py:459``),
+    which the stock WandbLogger writes verbatim into ``trainer/global_step``
+    — corrupting the x-axis for every ``val/*_step`` metric. This override
+    rewrites ``step`` from the attached trainer so the x-axis is always the
+    true optimizer step.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._trainer_ref = None
+
+    def attach_trainer(self, trainer):
+        self._trainer_ref = trainer
+
+    @rank_zero_only
+    def log_metrics(self, metrics, step=None):
+        if self._trainer_ref is not None:
+            step = int(self._trainer_ref.global_step)
+        return super().log_metrics(metrics, step=step)
+
+
+class AttachTrainerToLoggerCallback(Callback):
+    """Binds the trainer to ``GlobalStepWandbLogger`` as soon as setup runs,
+    so subsequent ``log_metrics`` calls can pull the real global_step."""
+
+    def setup(self, trainer, pl_module, stage):
+        for lg in trainer.loggers:
+            if isinstance(lg, GlobalStepWandbLogger):
+                lg.attach_trainer(trainer)
 
 
 # Things that should only be done by a single process
@@ -232,25 +268,14 @@ if __name__ == "__main__":
         # Generate a unique run ID so each restart creates a fresh WandB run
         # instead of resuming the previous one.
         wandb_run_id = wandb.util.generate_id()
-        wandb_logger = WandbLogger(
+        wandb_logger = GlobalStepWandbLogger(
             project=cfg_exp.log.wandb_project,
             id=wandb_run_id,
             entity=wandb_entity,
             name=wandb_run_name or run_name,
             config=OmegaConf.to_container(cfg_exp, resolve=True),
         )
-        # PL's WandbLogger doesn't pass explicit `step` to wandb.log(),
-        # so WandB auto-increments its internal counter on every call.
-        # With multiple log calls per optimizer step (step metrics, epoch
-        # metrics, LR monitor), the internal counter inflates vs global_step.
-        # Fix: tell WandB to use trainer/global_step as x-axis for everything.
-        # Access .experiment first to force WandbLogger to call wandb.init().
-        # DDP-safe: only rank 0 actually calls wandb.init(); non-rank-0 has
-        # WANDB_MODE=disabled and raw wandb.define_metric() would raise.
-        if local_rank == 0:
-            wandb_logger.experiment
-            wandb.define_metric("trainer/global_step")
-            wandb.define_metric("*", step_metric="trainer/global_step")
+        callbacks.append(AttachTrainerToLoggerCallback())
         callbacks.append(LogEpochTimeCallback())
         callbacks.append(LogSetpTimeCallback())
         callbacks.append(LearningRateMonitor(logging_interval="step"))
