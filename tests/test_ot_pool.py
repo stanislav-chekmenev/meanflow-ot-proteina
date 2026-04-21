@@ -236,3 +236,123 @@ def test_proteina_on_train_start_builds_pool_when_ot_pool_size_set():
     pool = OTPool(pool_size=8, batch_size=4, dim=3, scale_ref=1.0)
     assert pool.pool_size == 8
     assert pool.batch_size == 4
+
+
+# --- Task 7: integration tests -------------------------------------------
+
+
+def _build_proteina_cfg(ot_pool_size=4, loss_accumulation_steps=1):
+    from omegaconf import OmegaConf
+    return OmegaConf.create({
+        "model": {
+            "target_pred": "v",
+            "augmentation": {"global_rotation": False, "naug_rot": 1},
+            "nn": {
+                "name": "ca_af3",
+                "token_dim": 64, "nlayers": 2, "nheads": 4,
+                "residual_mha": True, "residual_transition": True,
+                "parallel_mha_transition": False, "use_attn_pair_bias": True,
+                "strict_feats": False,
+                "feats_init_seq": ["res_seq_pdb_idx", "chain_break_per_res"],
+                "feats_cond_seq": ["time_emb", "delta_t_emb"],
+                "t_emb_dim": 32, "dim_cond": 64, "idx_emb_dim": 32,
+                "fold_emb_dim": 32,
+                "feats_pair_repr": ["rel_seq_sep", "xt_pair_dists"],
+                "feats_pair_cond": ["time_emb", "delta_t_emb"],
+                "xt_pair_dist_dim": 16, "xt_pair_dist_min": 0.1,
+                "xt_pair_dist_max": 3,
+                "x_sc_pair_dist_dim": 16, "x_sc_pair_dist_min": 0.1,
+                "x_sc_pair_dist_max": 3,
+                "x_motif_pair_dist_dim": 16, "x_motif_pair_dist_min": 0.1,
+                "x_motif_pair_dist_max": 3,
+                "seq_sep_dim": 127, "pair_repr_dim": 32,
+                "update_pair_repr": False, "update_pair_repr_every_n": 2,
+                "use_tri_mult": False, "num_registers": 4,
+                "use_qkln": True, "num_buckets_predict_pair": 16,
+                "multilabel_mode": "sample", "cath_code_dir": ".",
+            },
+        },
+        "loss": {
+            "t_distribution": {"name": "uniform", "p1": 0.0, "p2": 1.0},
+            "loss_t_clamp": 0.9, "use_aux_loss": False,
+            "aux_loss_t_lim": 0.3, "thres_aux_2d_loss": 0.6,
+            "aux_loss_weight": 1.0, "num_dist_buckets": 16,
+            "max_dist_boundary": 1.0,
+        },
+        "training": {
+            "loss_accumulation_steps": loss_accumulation_steps,
+            "self_cond": False, "fold_cond": False,
+            "mask_T_prob": 0.5, "mask_A_prob": 0.5, "mask_C_prob": 0.5,
+            "motif_conditioning": False,
+            "ot_coupling": {
+                "enabled": True, "method": "exact",
+                "ot_pool_size": ot_pool_size,
+            },
+            "meanflow": {
+                "ratio": 0.5, "P_mean": -0.4, "P_std": 1.0,
+                "norm_p": 1.0, "norm_eps": 0.001, "nsteps_sample": 1,
+            },
+        },
+        "opt": {"lr": 1e-4},
+    })
+
+
+def test_training_step_pool_mode_runs_and_loss_finite():
+    """Pool is built on on_train_start, _get_ot_batch cycles through two
+    batches, and refills on third call. Loss is finite."""
+    from proteinfoundation.proteinflow.proteina import Proteina
+
+    cfg_exp = _build_proteina_cfg(ot_pool_size=4, loss_accumulation_steps=1)
+    model = Proteina(cfg_exp=cfg_exp)
+    model.to("cpu")
+    model.train()
+
+    class _FakeDM:
+        batch_size = 2
+        train_ds = _FakeDataset(n_proteins=16, n_residues=8, seed=42)
+        def setup(self, stage): pass
+
+    class _FakeTrainer:
+        datamodule = _FakeDM()
+        world_size = 1
+
+    model._trainer = _FakeTrainer()
+    model.on_train_start()
+
+    assert model._ot_pool is not None
+    assert model._ot_pool.pool_size == 4
+    assert model._ot_pool.batch_size == 2
+    assert model._ot_pool.empty  # not yet refilled
+
+    # Call _get_ot_batch twice - pool size 4, batch 2 -> two batches then empty.
+    x1a, x0a, ma, _, _, _ = model._get_ot_batch()
+    assert torch.isfinite(x1a).all() and torch.isfinite(x0a).all()
+    assert not model._ot_pool.empty
+    x1b, x0b, mb, _, _, _ = model._get_ot_batch()
+    assert model._ot_pool.empty  # consumed the whole pool
+
+    # Third call triggers refill - pool becomes non-empty again.
+    x1c, x0c, mc, _, _, _ = model._get_ot_batch()
+    assert not model._ot_pool.empty
+
+
+def test_on_train_start_rejects_pool_with_loss_accum_gt_1():
+    from proteinfoundation.proteinflow.proteina import Proteina
+
+    cfg_exp = _build_proteina_cfg(ot_pool_size=4, loss_accumulation_steps=2)
+    model = Proteina(cfg_exp=cfg_exp)
+    model.to("cpu")
+
+    class _FakeDM:
+        batch_size = 2
+        train_ds = _FakeDataset(n_proteins=16, n_residues=8, seed=0)
+        def setup(self, stage): pass
+
+    class _FakeTrainer:
+        datamodule = _FakeDM()
+        world_size = 1
+
+    model._trainer = _FakeTrainer()
+
+    with pytest.raises(AssertionError, match="loss_accumulation_steps"):
+        model.on_train_start()
