@@ -132,9 +132,10 @@ class OTPool:
         x_1_sel = x_1_sel[:, :n_sel, :]
         x_0_sel = x_0_sel[:, :n_sel, :]
         mask_sel = mask_sel[:, :n_sel]
-        # Re-apply mask + zero COM after trim (trim can change COM via padding removal).
-        x_1_sel = fm._mask_and_zero_com(x_1_sel, mask_sel)  # inject fm via ctor or param
-        x_0_sel = fm._mask_and_zero_com(x_0_sel, mask_sel)
+        # No post-trim _mask_and_zero_com: refill already applied it, and
+        # trimming off a region where mask==0 changes neither the COM
+        # numerator (x*mask contributes zero there) nor denominator
+        # (mask.sum() is unchanged). So COM is preserved at zero.
         return (
             x_1_sel.to(device),
             x_0_sel.to(device),
