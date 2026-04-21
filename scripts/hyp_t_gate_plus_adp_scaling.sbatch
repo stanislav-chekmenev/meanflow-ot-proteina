@@ -29,7 +29,7 @@ echo "==========================================="
 # CODE_ROOT is this hypothesis's git worktree — configs and code come from
 # the hypothesis branch so the run picks up branch-specific changes.
 REPO_ROOT="/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina"
-CODE_ROOT="$REPO_ROOT/.claude/worktrees/agent-merge-tgate-adp"
+CODE_ROOT=$REPO_ROOT
 DATA_ROOT="/netscratch/schekmenev"
 
 # Unpack .venv to scratch (once per node, skips if already present)
@@ -89,10 +89,10 @@ export NCCL_SHM_DISABLE=0
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca_debug.yaml)
-EXP_NAME="hyp-t-gate-plus-adp-scaling"
+EXP_NAME="base-p1-sc"
 
 # Guardrail #1: accumulate_grad_batches=1 matches reality on 1-micro-batch/epoch.
-ACCUMULATE_GRAD_BATCHES=1
+ACCUMULATE_GRAD_BATCHES=6
 # Guardrail #2: eval at nsamples=16 so chirality is a mean in [-1, +1] rather
 # than a 1-bit Bernoulli sample. Reducer in protein_eval.py averages across
 # the batch.
@@ -103,10 +103,10 @@ OT_COUPLING_ENABLED=False
 # Combined hypothesis: norm_p=1 activates adp_wt scaling on both the MF
 # loss (existing behaviour) AND the chirality hinge (adp-wt-scaling fix,
 # applied AFTER the t-gate per gate-then-scale ordering).
-MEANFLOW_NORM_P=0
+MEANFLOW_NORM_P=1
 NCPUS_PER_TASK_TRAIN=16
 NCPUS_PER_TASK_PREPRO=2
-NOISE_SAMPLES=0
+OT_POOL_SIZE=0
 LOSS_ACCUMULATION_STEPS=1
 # Guardrail #4: datamodule.repeat=2, batch_size=2, max_epochs=20000 unchanged.
 MAX_EPOCHS=13000
@@ -118,11 +118,11 @@ LR=1.e-4
 
 # Self-conditioning — disabled so this run isolates the combined
 # t-gate + adp-wt-scaling effect.
-SELF_COND=False
-SELF_COND_PROB=0.0
+SELF_COND=True
+SELF_COND_PROB=0.5
 
 # Chirality hinge loss — ENABLED, t-gated to low-t AND adp_wt-scaled.
-CHIRALITY_ENABLED=True
+CHIRALITY_ENABLED=False
 CHIRALITY_WEIGHT=1.0
 CHIRALITY_MARGIN_ALPHA=0.5
 CHIRALITY_STRIDE=1
@@ -138,6 +138,9 @@ CHIRALITY_T_GATE_MODE=hard
 # Dataset config (pdb_debug.yaml)
 DATAMODULE_REPEAT=2
 DATAMODULE_BATCH_SIZE=2
+
+# Augmentation config (caflow.yaml) — disable global rotation
+GLOBAL_ROTATION=False
 
 # --- Run training ---
 echo "Starting MeanFlow training for hypothesis t-gate-plus-adp-scaling..."
@@ -168,7 +171,7 @@ srun python "$CODE_ROOT/proteinfoundation/train.py" \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
-        training.ot_coupling.noise_samples=$NOISE_SAMPLES \
+        training.ot_coupling.ot_pool_size=$OT_POOL_SIZE \
         training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
         training.self_cond=$SELF_COND \
@@ -179,6 +182,7 @@ srun python "$CODE_ROOT/proteinfoundation/train.py" \
         training.chirality_loss.stride=$CHIRALITY_STRIDE \
         training.chirality_loss.t_gate_max=$CHIRALITY_T_GATE_MAX \
         training.chirality_loss.t_gate_mode=$CHIRALITY_T_GATE_MODE \
+        model.augmentation.global_rotation=$GLOBAL_ROTATION \
     --data_overrides \
         datamodule.repeat=$DATAMODULE_REPEAT \
         datamodule.batch_size=$DATAMODULE_BATCH_SIZE

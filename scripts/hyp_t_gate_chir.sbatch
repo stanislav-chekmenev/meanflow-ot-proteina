@@ -99,7 +99,7 @@ OT_COUPLING_ENABLED=False
 MEANFLOW_NORM_P=0
 NCPUS_PER_TASK_TRAIN=16
 NCPUS_PER_TASK_PREPRO=2
-NOISE_SAMPLES=0
+OT_POOL_SIZE=0
 LOSS_ACCUMULATION_STEPS=1
 # Guardrail #4: datamodule.repeat=2, batch_size=2, max_epochs=20000 unchanged.
 MAX_EPOCHS=20000
@@ -158,7 +158,7 @@ srun python "$CODE_ROOT/proteinfoundation/train.py" \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
-        training.ot_coupling.noise_samples=$NOISE_SAMPLES \
+        training.ot_coupling.ot_pool_size=$OT_POOL_SIZE \
         training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
         training.self_cond=$SELF_COND \

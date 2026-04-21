@@ -50,6 +50,7 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
+    ot_pool_size: null   # Enable streaming OT pool by setting to a multiple of batch_size; null disables it.
   meanflow:
     ratio: 0.25
     P_mean_t: -0.4
@@ -80,7 +81,7 @@ opt:
   dist_strategy: ddp  # For multi GPU training, do not change
 
 log:
-  wandb_project: protein_transformer_big_runs  # Leave this so we can compare runs easily
+  wandb_project: meanflow-ot-proteina  # Leave this so we can compare runs easily
   wandb_entity: null  # W&B team/entity (null = personal account)
   wandb_run_name: null  # Display name override (null = use run_name_)
   log_wandb: True  # whether to log to wandb

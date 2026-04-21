@@ -44,7 +44,7 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
-    noise_samples: 128
+    ot_pool_size: 128
   meanflow:
     # Current proteina defaults.
     # For reference, CIFAR10 MeanFlow v1 uses: ratio=0.75, P_mean_t=-0.6,
