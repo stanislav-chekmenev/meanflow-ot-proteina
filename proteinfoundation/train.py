@@ -245,9 +245,12 @@ if __name__ == "__main__":
         # metrics, LR monitor), the internal counter inflates vs global_step.
         # Fix: tell WandB to use trainer/global_step as x-axis for everything.
         # Access .experiment first to force WandbLogger to call wandb.init().
-        wandb_logger.experiment
-        wandb.define_metric("trainer/global_step")
-        wandb.define_metric("*", step_metric="trainer/global_step")
+        # DDP-safe: only rank 0 actually calls wandb.init(); non-rank-0 has
+        # WANDB_MODE=disabled and raw wandb.define_metric() would raise.
+        if local_rank == 0:
+            wandb_logger.experiment
+            wandb.define_metric("trainer/global_step")
+            wandb.define_metric("*", step_metric="trainer/global_step")
         callbacks.append(LogEpochTimeCallback())
         callbacks.append(LogSetpTimeCallback())
         callbacks.append(LearningRateMonitor(logging_interval="step"))
@@ -298,9 +301,7 @@ if __name__ == "__main__":
             "save_weights_only": False,
             "filename": "chk_{epoch:08d}_{step:012d}",
             "every_n_train_steps": cfg_exp.log.checkpoint_every_n_steps,
-            "monitor": "train/loss",
-            "save_top_k": 10000,
-            "mode": "min",
+            "save_top_k": -1,
         }
         checkpoint_callback = EmaModelCheckpoint(**args_ckpt)
         checkpoint_callback_last = EmaModelCheckpoint(**args_ckpt_last)

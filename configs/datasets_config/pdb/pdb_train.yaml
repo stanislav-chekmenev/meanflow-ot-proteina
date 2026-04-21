@@ -1,6 +1,6 @@
 datamodule:
   _target_: "proteinfoundation.datasets.pdb_data.PDBLightningDataModule"
-  data_dir: ${oc.env:DATA_PATH}/pdb_train/ # Directory where the dataset is stored
+  data_dir: ${oc.env:DATA_PATH}/ # Directory where the dataset is stored
   in_memory: False
   format: "cif" # format for file download
   overwrite: False # Whether to overwrite existing dataset files and reprocess the raw data
@@ -18,7 +18,7 @@ datamodule:
 
   dataselector:
     _target_: "proteinfoundation.datasets.pdb_data.PDBDataSelector"
-    data_dir: ${oc.env:DATA_PATH}/pdb_train/ # Directory where the dataset is stored
+    data_dir: ${oc.env:DATA_PATH}/ # Directory where the dataset is stored
     fraction: 0.0005 # Fraction of dataset to use
     molecule_type: "protein" # Type of molecule for which to select
     experiment_types: ["diffraction", "EM"] # other options are "NMR" and "other"
@@ -36,7 +36,7 @@ datamodule:
 
   datasplitter:
     _target_: "proteinfoundation.datasets.pdb_data.PDBDataSplitter"
-    data_dir: ${oc.env:DATA_PATH}/pdb_train/ # Directory where the dataset is stored
+    data_dir: ${oc.env:DATA_PATH}/ # Directory where the dataset is stored
     train_val_test: [0.98, 0.019, 0.001] # Cross-validation ratios to use for train, val, and test splits
     split_type: "sequence_similarity" # Split sequences by sequence similarity clustering, other option is "random"
     split_sequence_similarity: 0.5 # Clustering at 50% sequence similarity (argument is ignored if split_type!="sequence_similarity")

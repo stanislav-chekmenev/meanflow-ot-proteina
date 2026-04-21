@@ -83,7 +83,7 @@ opt:
   dist_strategy: ddp  # For multi GPU training, do not change
 
 log:
-  wandb_project: protein_transformer_big_runs  # Leave this so we can compare runs easily
+  wandb_project: meanflow-ot-proteina  # Leave this so we can compare runs easily
   wandb_entity: null  # W&B team/entity (null = personal account)
   wandb_run_name: null  # Display name override (null = use run_name_)
   log_wandb: True  # whether to log to wandb
@@ -101,5 +101,9 @@ ema:
 
 eval:
   enabled: True           # Periodic ProteinEvalCallback (unconditional generation + viz)
-  val_enabled: False       # ProteinValEvalCallback over first n_val_proteins of the val set
-  n_val_proteins: 16       # How many val proteins to track in ProteinValEvalCallback
+  every_n_steps: 1000     # How often ProteinEvalCallback runs (in training steps)
+  n_residues: 128         # Length of unconditionally generated proteins
+  nsamples: 1             # Number of generations per eval
+  ground_truth_pdb: null  # Optional reference PDB for side-by-side viz (null = skip)
+  val_enabled: False      # ProteinValEvalCallback over first n_val_proteins of the val set
+  n_val_proteins: 16      # How many val proteins to track in ProteinValEvalCallback
