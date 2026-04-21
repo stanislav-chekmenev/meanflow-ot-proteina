@@ -93,4 +93,35 @@ class OTPool:
         del M, x_1_flat, x_0_flat
 
     def next_batch(self, device):
-        raise NotImplementedError  # Task 3
+        """Pop B indices from the permutation, trim, and ship to device.
+
+        Returns:
+            (x_1, x_0, mask, batch_shape, n, dtype) on `device`.
+        """
+        assert not self.empty, "OTPool is empty - call refill() first."
+        idx = self._perm[self._cursor : self._cursor + self.batch_size]
+        self._cursor += self.batch_size
+
+        x_1_sel = self._x1[idx]      # [B, N_pool, 3] CPU
+        x_0_sel = self._x0[idx]      # [B, N_pool, 3] CPU
+        mask_sel = self._mask[idx]   # [B, N_pool]    CPU
+
+        # Trim to max actual length among selected rows.
+        n_sel = int(mask_sel.sum(dim=1).max().item())
+        if n_sel == 0:
+            n_sel = x_1_sel.shape[1]
+        x_1_sel = x_1_sel[:, :n_sel, :]
+        x_0_sel = x_0_sel[:, :n_sel, :]
+        mask_sel = mask_sel[:, :n_sel]
+
+        dtype = self._x1.dtype
+        batch_shape = torch.Size([self.batch_size])
+
+        return (
+            x_1_sel.to(device),
+            x_0_sel.to(device),
+            mask_sel.to(device),
+            batch_shape,
+            n_sel,
+            dtype,
+        )
