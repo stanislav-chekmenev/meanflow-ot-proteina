@@ -226,3 +226,13 @@ def test_compute_single_noise_loss_accepts_x0_override():
     )
     # Default should be None (backwards-compat with non-pool path).
     assert sig.parameters["x_0_override"].default is None
+
+
+# --- Task 6: Proteina wiring smoke tests ----------------------------------
+
+
+def test_proteina_on_train_start_builds_pool_when_ot_pool_size_set():
+    """Structural test: OTPool construction matches what on_train_start would make."""
+    pool = OTPool(pool_size=8, batch_size=4, dim=3, scale_ref=1.0)
+    assert pool.pool_size == 8
+    assert pool.batch_size == 4

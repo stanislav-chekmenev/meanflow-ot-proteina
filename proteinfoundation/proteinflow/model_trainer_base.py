@@ -483,14 +483,19 @@ class ModelTrainerBase(L.LightningModule):
 
         # --- 1. Shared setup: extract x_1, mask, sample (t, r), fold conditioning ---
         ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
-        noise_samples = ot_cfg.get("noise_samples", None)
+        pool_size = ot_cfg.get("ot_pool_size", None)
+        pool_mode = (
+            pool_size is not None
+            and self.ot_sampler is not None
+            and not val_step
+        )
 
-        if noise_samples is not None and self.ot_sampler is not None:
-            # OT pool: _build_ot_pool determines which proteins to train on.
-            # x_0 from the pool is discarded; each noise pass in the K loop
-            # samples fresh x_0 and runs standard OT against the fixed x_1.
-            x_1, _x_0_pool, mask, batch_shape, n, dtype = self._build_ot_pool(batch)
+        if pool_mode:
+            # OT pool: pool owns (x_1, x_0) pairing. x_0 flows through as
+            # x_0_override into _compute_single_noise_loss.
+            x_1, x_0_pool, mask, batch_shape, n, dtype = self._get_ot_batch()
         else:
+            x_0_pool = None
             x_1, mask, batch_shape, n, dtype = self.extract_clean_sample(batch)
             x_1 = self.fm._mask_and_zero_com(x_1, mask)
 
@@ -548,6 +553,7 @@ class ModelTrainerBase(L.LightningModule):
         if K == 1:
             combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir, raw_adp_wt_mean = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
+                x_0_override=x_0_pool,
             )
 
             self.log(
