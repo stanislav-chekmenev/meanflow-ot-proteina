@@ -154,7 +154,9 @@ decide. It does not affect the data flow.
 - **`on_train_start`**: construct `self._ot_pool = OTPool(pool_size,
   batch_size, self.fm.dim, self.fm.scale_ref)` when
   `ot_coupling.ot_pool_size` is set and `self.ot_sampler is not None`.
-  Keep storing `self._ot_dataset` as today.
+  Keep storing `self._ot_dataset` as today. Assert
+  `self.loss_accumulation_steps == 1` in pool mode (fail fast with a
+  clear message — pool + K>1 is unsupported by design).
 - **Remove `_build_ot_pool`.** Its refill logic moves into `OTPool.refill()`.
 - **Add `_get_ot_batch()`** (small helper):
   ```python
@@ -176,12 +178,27 @@ dataset-sampled inside `refill`).
 # Before:
 # x_1, _x_0_pool, mask, batch_shape, n, dtype = self._build_ot_pool(batch)
 
-# After: dtype is carried by pool tensors (set during refill from
-# extract_clean_sample's dtype) — no need to read the dataloader batch.
-x_1, x_0, mask, batch_shape, n, dtype = self._get_ot_batch()
-# Downstream path uses `x_0` directly — no second noise-sampling pass required
-# inside the K-loop, because the pool's x_0 is already the OT counterpart of x_1.
+# After: the pool's x_0 IS the training x_0 — no fresh re-sampling
+# inside _compute_single_noise_loss when pool mode is active.
+x_1, x_0_pool, mask, batch_shape, n, dtype = self._get_ot_batch()
 ```
+
+Pool mode owns the (x_1, x_0) pairing end-to-end. To honor this,
+`_compute_single_noise_loss` gains an optional `x_0_override` argument:
+
+- **If provided:** skip the internal `self.fm.sample_reference(...)` and
+  the internal `self.ot_sampler.sample_plan_with_scipy(...)` call; use
+  `x_0_override` as-is. This is the pool-mode path.
+- **If None (default):** current behavior — sample fresh x_0 and run B×B
+  OT, exactly as today. This preserves the non-pool code path.
+
+In `training_step`, pool mode passes `x_0_override=x_0_pool` on the K=1
+branch. Because the pool supplies exactly one OT-paired x_0 per served
+batch, **pool mode requires `loss_accumulation_steps == 1`** — asserted
+at `on_train_start`. K>1 with the pool is explicitly unsupported (the
+intended efficiency model pays one Hungarian per K/B dataloader steps;
+running K extra noise passes per micro-step reintroduces the
+fresh-noise-plus-B×B-OT the pool is meant to replace).
 
 `_get_ot_batch` takes no dtype argument; the pool determines its own dtype
 during `refill` from the first protein it loads (mirrors how
@@ -246,10 +263,12 @@ no longer exists). No soft-deprecation path.
   today's pool.
 - **Validation step.** Unchanged. `training_step(val_step=True)` does not
   go through the pool (the pool only wraps training-time OT).
-- **Gradient accumulation.** Each micro-step calls `_get_ot_batch`
-  independently. `accumulate_grad_batches=N` means `N` pool draws per
-  optimizer step. No interaction with pool cycle length (they are
-  independent dimensions).
+- **Gradient accumulation.** `accumulate_grad_batches=N` (Lightning-level
+  accumulation) means `N` pool draws per optimizer step. No interaction
+  with pool cycle length — they are independent dimensions.
+- **`loss_accumulation_steps` (manual K-loop).** Pool mode requires
+  `loss_accumulation_steps == 1`, enforced at `on_train_start`. Pool +
+  K>1 is explicitly unsupported.
 - **DDP / multi-GPU.** Each rank holds its own pool. Pool content differs
   across ranks (random dataset indices drawn independently). This matches
   today's behavior — `_build_ot_pool` also samples per-rank.
@@ -298,7 +317,9 @@ directly is updated.
   `_build_ot_pool`, add `_get_ot_batch`, construct `OTPool` in
   `on_train_start`, read `ot_pool_size`.
 - **Modified:** `proteinfoundation/proteinflow/model_trainer_base.py` —
-  read `ot_pool_size` (not `noise_samples`), call `_get_ot_batch()`.
+  read `ot_pool_size` (not `noise_samples`), call `_get_ot_batch()`,
+  thread `x_0_override` through `_compute_single_noise_loss` to bypass
+  fresh-noise sampling and B×B OT when pool mode is active.
 - **Modified:** `configs/experiment_config/training_ca.yaml` — add
   `ot_pool_size`.
 - **Modified:** `configs/experiment_config/training_ca_debug.yaml` —
@@ -308,13 +329,25 @@ directly is updated.
   override. (Scripts in other worktrees stay pinned to their own code
   version and are out of scope.)
 
+## Behavior changes vs. current pool
+
+- **Pool x_0 is no longer discarded.** Previously the K×K Hungarian
+  picked an OT pairing, the x_0 half was thrown away, and
+  `_compute_single_noise_loss` resampled fresh x_0 + ran a separate B×B
+  OT inside the K-loop. Now the pool's x_0 flows straight through to the
+  JVP/FM loss — the K×K Hungarian is the *actual* OT coupling used.
+- **Pool mode forbids `loss_accumulation_steps > 1`** (asserted). This
+  aligns with the production sbatch (`LOSS_ACCUMULATION_STEPS=1`) and
+  with the "one OT pair per training sample" contract.
+
 ## Non-goals
 
 - **OT algorithm change.** Hungarian on flat `[K, N*3]` cost is kept
-  exactly as-is. This change is a streaming refactor, not a numerical
+  as-is. This change is streaming + x_0-propagation, not a numerical OT
   change.
 - **Sinkhorn / approximate OT.** Out of scope.
-- **Removing the K-loop over fresh noise** in the pool-off branch.
-  Untouched.
+- **Modifying the non-pool path** (`ot_coupling.enabled=True` with no
+  `ot_pool_size`). Untouched — still samples fresh x_0 and runs B×B OT
+  in `_compute_single_noise_loss`.
 - **Soft deprecation** of `noise_samples`. We rename hard — any lingering
   reference is fixed in the same PR.
