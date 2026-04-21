@@ -4,6 +4,14 @@ __pycache__/
 
 lightning_logs
 
+# Data
+data/pdb_train
+data/d_21M
+data/d_FS
+data/metric_factory
+data/ot_proteina_ds
+
+
 .ipynb_checkpoints/
 
 .DS_Store
