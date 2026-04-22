@@ -170,6 +170,12 @@ def test_val_step_logs_under_val_prefix():
     assert "val/combined_adaptive_loss" in logged_keys, (
         f"Expected 'val/combined_adaptive_loss' in logged keys, got: {logged_keys}"
     )
+    # Raw losses must also appear on val so train/val raw-loss curves can be
+    # compared directly. Previously gated behind `if not val_step:`.
+    for required in ("val/raw_loss_mf", "val/raw_loss_fm", "val/raw_loss_chirality", "val/raw_adp_wt_mean"):
+        assert required in logged_keys, (
+            f"Expected {required!r} in logged keys, got: {logged_keys}"
+        )
 
     # No key should use the old "validation_loss/" prefix.
     stale_keys = [k for k in logged_keys if k.startswith("validation_loss/")]

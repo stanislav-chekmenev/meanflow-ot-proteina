@@ -103,7 +103,7 @@ eval:
   enabled: True           # Periodic ProteinEvalCallback (unconditional generation + viz)
   every_n_steps: 1000     # How often ProteinEvalCallback runs (in training steps)
   n_residues: 128         # Length of unconditionally generated proteins
-  nsamples: 1             # Number of generations per eval
+  nsamples: 3             # Number of generations per protein per mode; metrics averaged over draws. Higher -> lower single-eval RMSD variance.
   ground_truth_pdb: null  # Optional reference PDB for side-by-side viz (null = skip)
   val_enabled: False      # ProteinValEvalCallback over first n_val_proteins of the val set
-  n_val_proteins: 16      # How many val proteins to track in ProteinValEvalCallback
+  n_val_proteins: 48      # How many val proteins to track in ProteinValEvalCallback

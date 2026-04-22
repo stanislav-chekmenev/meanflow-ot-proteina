@@ -330,11 +330,17 @@ class TestProteinValEvalCallback:
             f"samples/protein_table must be a wandb.Table; got {type(table)!r}"
         )
         assert table.columns == [
+            "global_step",
+            "lr",
             "protein_id",
             "rmsd_mf1",
             "rmsd_mf10x",
             "rmsd_reflected_mf1",
             "rmsd_reflected_mf10x",
+            "chirality_mf1",
+            "chirality_mf10x",
+            "rmsd_mf1_best",
+            "rmsd_mf10x_best",
             "ground_truth",
             "mf1",
             "mf10x",
@@ -342,6 +348,11 @@ class TestProteinValEvalCallback:
         assert len(table.rows) == 2, (
             f"Expected 2 rows (one per val protein); got {len(table.rows)}"
         )
+        # First column is the annotating global_step; every row must carry it.
+        for row in table.rows:
+            assert row[0] == 50, (
+                f"Expected global_step=50 in every row; got {row[0]}"
+            )
 
         # No per-protein val/<pid>/* molecule keys must appear in the log.
         per_protein_keys = [
@@ -354,3 +365,46 @@ class TestProteinValEvalCallback:
             f"Per-protein molecule keys should be gone, but found: "
             f"{per_protein_keys}"
         )
+
+    def test_nsamples_triggers_multiple_generate_calls(self, tmp_path):
+        """With nsamples=3 the callback must call generate() 6 times per protein
+        (3 for mf1 + 3 for mf10x) so per-draw metrics can be averaged."""
+        from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
+
+        val_ds = _make_val_ds(n_proteins=1, n_res_list=[10])
+        trainer = _make_trainer(val_ds, global_step=77)
+        pl_module = _make_pl_module(10)
+
+        # Wrap fake_generate in a MagicMock so we can count calls.
+        generate_calls = []
+        original_generate = pl_module.generate
+
+        def counting_generate(nsamples, n, nsteps, mask=None):
+            generate_calls.append(nsteps)
+            return original_generate(nsamples=nsamples, n=n, nsteps=nsteps, mask=mask)
+
+        pl_module.generate = counting_generate
+
+        cb = ProteinValEvalCallback(
+            run_name="test_nsamples", n_val_proteins=1, nsamples=3
+        )
+        cb._tmp_dir = str(tmp_path)
+
+        with (
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
+                return_value="fake-mol",
+            ),
+            mock.patch(
+                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                return_value=mock.MagicMock(add_data=lambda *a: None),
+            ),
+        ):
+            cb.on_validation_epoch_end(trainer, pl_module)
+
+        # 3 mf1 calls (nsteps=1) + 3 mf10x calls (nsteps=10) = 6 total.
+        assert len(generate_calls) == 6, (
+            f"Expected 6 generate calls (3 per mode); got {len(generate_calls)}: {generate_calls}"
+        )
+        assert generate_calls.count(1) == 3
+        assert generate_calls.count(10) == 3

@@ -304,8 +304,13 @@ if __name__ == "__main__":
 
     if eval_cfg is not None and eval_cfg.get("val_enabled", False) and wandb_logger is not None:
         n_val = int(eval_cfg.get("n_val_proteins", 16))
+        val_nsamples = int(eval_cfg.get("nsamples", 1))
         callbacks.append(
-            ProteinValEvalCallback(run_name=run_name, n_val_proteins=n_val)
+            ProteinValEvalCallback(
+                run_name=run_name,
+                n_val_proteins=n_val,
+                nsamples=val_nsamples,
+            )
         )
 
     log_info(f"Using EMA with decay {cfg_exp.ema.decay}")

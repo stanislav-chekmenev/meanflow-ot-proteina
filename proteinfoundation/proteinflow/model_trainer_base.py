@@ -567,52 +567,52 @@ class ModelTrainerBase(L.LightningModule):
                 sync_dist=True,
                 add_dataloader_idx=False,
             )
-            if not val_step:
-                self.log(
-                    f"{log_prefix}/raw_loss_mf",
-                    raw_loss_mf,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=True,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.log(
-                    f"{log_prefix}/raw_loss_fm",
-                    raw_loss_fm,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=True,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.log(
-                    f"{log_prefix}/raw_loss_chirality",
-                    raw_loss_chir,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.log(
-                    f"{log_prefix}/raw_adp_wt_mean",
-                    raw_adp_wt_mean,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
+            self.log(
+                f"{log_prefix}/raw_loss_mf",
+                raw_loss_mf,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                f"{log_prefix}/raw_loss_fm",
+                raw_loss_fm,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                f"{log_prefix}/raw_loss_chirality",
+                raw_loss_chir,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                f"{log_prefix}/raw_adp_wt_mean",
+                raw_adp_wt_mean,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
 
+            if not val_step:
                 b, n = mask.shape
                 self.nsamples_processed = (
                     self.nsamples_processed + b * self.trainer.world_size

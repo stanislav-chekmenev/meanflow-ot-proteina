@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=mf_base
+#SBATCH --job-name=mf_ot
 #SBATCH --partition=gpu
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:rtx6000:2
 #SBATCH --ntasks-per-node=2
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=48G
+#SBATCH --mem=128G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=logs/train_base_%j.out
 #SBATCH --error=logs/train_base_%j.err
@@ -161,23 +161,24 @@ export NCCL_COMM_ID_TIMEOUT=60
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca.yaml)
-EXP_NAME="meanflow-base"
+EXP_NAME="meanflow-ot-eucl"
 ACCUMULATE_GRAD_BATCHES=3
 VAL_CHECK_INTERVAL=1000
-OT_COUPLING_ENABLED=False
+OT_COUPLING_ENABLED=True
 MEANFLOW_NORM_P=1
-NOISE_SAMPLES=64
+OT_POOL_SIZE=128
 LOSS_ACCUMULATION_STEPS=1
 MAX_EPOCHS=15000
-WARMUP_STEPS=2000
-LR_DECAY_TOTAL_STEPS=42000
+WARMUP_STEPS=500
+LR_DECAY_TOTAL_STEPS=200000
 INIT_LR=1e-6
-END_LR=1e-5
+END_LR=3e-5
 LR=1e-4
 
 # Eval
 EVAL_ENABLED=True
-EVAL_N_VAL_PROTEINS=16
+EVAL_N_VAL_PROTEINS=48
+EVAL_NSAMPLES=3
 
 # Self-conditioning
 SELF_COND=True
@@ -222,8 +223,9 @@ srun python "$CODE_ROOT/proteinfoundation/train.py" \
         opt.val_check_interval=$VAL_CHECK_INTERVAL \
         eval.val_enabled=$EVAL_ENABLED \
         eval.n_val_proteins=$EVAL_N_VAL_PROTEINS \
+        eval.nsamples=$EVAL_NSAMPLES \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
-        training.ot_coupling.noise_samples=$NOISE_SAMPLES \
+        training.ot_coupling.ot_pool_size=$OT_POOL_SIZE \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
         training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
         training.self_cond=$SELF_COND \
