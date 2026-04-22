@@ -85,6 +85,7 @@ log:
   wandb_run_name: null
   log_wandb: True
   checkpoint: False    # No checkpoints for debug
+  top_k_by_val_rmsd_mf1: 3  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
 
 seed: 42
 

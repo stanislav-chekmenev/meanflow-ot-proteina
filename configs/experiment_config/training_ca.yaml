@@ -90,6 +90,7 @@ log:
   checkpoint: True  # whether to store checkpoints
   checkpoint_every_n_steps: 10000  # How often we store a checkpoint, should be greater than val_check_interval above
   last_ckpt_every_n_steps: 3000  # How often do we update our last ckpt, needed for requeuing without losing progress
+  top_k_by_val_rmsd_mf1: 3  # Keep this many best-val-RMSD checkpoints (mode=min on val/rmsd_mf1). 0 = keep only the "last" ckpt.
 
 seed: 42
 
