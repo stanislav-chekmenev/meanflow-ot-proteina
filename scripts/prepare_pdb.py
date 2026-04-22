@@ -1,11 +1,11 @@
 """
-Prepare a ~1000-protein PDB dataset for MeanFlow training.
+Prepare a ~10000-protein PDB dataset for MeanFlow training.
 
 Downloads CIF files, processes them into .pt graphs, writes the CSV index,
 runs mmseqs2 clustering, and creates train/val/test splits.
 
 Usage:
-    DATA_PATH=/path/to/data python scripts/prepare_pdb_1k.py [--fraction 0.008]
+    DATA_PATH=/path/to/data python scripts/prepare_pdb_10k.py [--fraction 0.025]
 
 The script is a thin wrapper around PDBLightningDataModule.prepare_data() and
 setup('fit').  All filtering, downloading, and processing logic lives there.
