@@ -273,7 +273,7 @@ class ModelTrainerBase(L.LightningModule):
             return torch.ones_like(loss)
         return (loss.detach() + norm_eps) ** norm_p
 
-    def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B, *, use_sc=False):
+    def _compute_single_noise_loss(self, x_1, mask, t_ext, r_ext, t, batch, B, *, use_sc=False, x_0_override=None):
         """
         Runs one noise sample through the MeanFlow + FM loss pipeline.
 
@@ -292,6 +292,9 @@ class ModelTrainerBase(L.LightningModule):
                 x_sc and feed it as a detached constant into the JVP and FM
                 sub-passes. Requires the NN config to declare x_sc /
                 x_sc_pair_dists in its feature lists.
+            x_0_override: If not None, use this tensor as x_0 verbatim and
+                skip the internal fresh-noise sampling + B x B OT.
+                Shape must match ``x_1`` ([B, n, 3]).
 
         Returns:
             combined_adp_loss: scalar tensor (requires_grad=True)
@@ -305,14 +308,19 @@ class ModelTrainerBase(L.LightningModule):
         dtype = x_1.dtype
         batch_shape = x_1.shape[:-2]  # (B,)
 
-        # 1. Sample noise
-        x_0 = self.fm.sample_reference(
-            n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
-        )
-        # 2. Standard square-batch OT (when noise_samples pool is NOT active)
-        if self.ot_sampler is not None:
-            ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_1, x_0, mask)
-            x_0 = x_0[ot_noise_idx]
+        if x_0_override is not None:
+            # Pool mode: x_0 is pre-paired with x_1 via the K x K Hungarian
+            # in OTPool.refill. Skip fresh-noise sampling and B x B OT.
+            x_0 = x_0_override
+        else:
+            # 1. Sample noise
+            x_0 = self.fm.sample_reference(
+                n=n, shape=batch_shape, device=self.device, dtype=dtype, mask=mask
+            )
+            # 2. Standard square-batch OT (when pool is NOT active)
+            if self.ot_sampler is not None:
+                ot_noise_idx = self.ot_sampler.sample_plan_with_scipy(x_1, x_0, mask)
+                x_0 = x_0[ot_noise_idx]
 
         # 3. Interpolate: z_t = (1-t)*x_1 + t*x_0 (paper convention)
         z = (1 - t_ext) * x_1 + t_ext * x_0
@@ -460,13 +468,13 @@ class ModelTrainerBase(L.LightningModule):
 
         Args:
             batch: Data batch.
-            val_step: If True, logs under "validation_loss" prefix and skips
+            val_step: If True, logs under "val" prefix and skips
                 scaling stats. Validation always uses K=1 (single noise sample).
 
         Returns:
             Training loss (scalar) for K=1/automatic optimization, or None for K>1/manual.
         """
-        log_prefix = "validation_loss" if val_step else "train"
+        log_prefix = "val" if val_step else "train"
 
         assert not self.motif_conditioning, (
             "Motif conditioning is not yet supported with MeanFlow training. "
@@ -475,14 +483,19 @@ class ModelTrainerBase(L.LightningModule):
 
         # --- 1. Shared setup: extract x_1, mask, sample (t, r), fold conditioning ---
         ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
-        noise_samples = ot_cfg.get("noise_samples", None)
+        pool_size = ot_cfg.get("ot_pool_size", None)
+        pool_mode = (
+            pool_size is not None
+            and self.ot_sampler is not None
+            and not val_step
+        )
 
-        if noise_samples is not None and self.ot_sampler is not None:
-            # OT pool: _build_ot_pool determines which proteins to train on.
-            # x_0 from the pool is discarded; each noise pass in the K loop
-            # samples fresh x_0 and runs standard OT against the fixed x_1.
-            x_1, _x_0_pool, mask, batch_shape, n, dtype = self._build_ot_pool(batch)
+        if pool_mode:
+            # OT pool: pool owns (x_1, x_0) pairing. x_0 flows through as
+            # x_0_override into _compute_single_noise_loss.
+            x_1, x_0_pool, mask, batch_shape, n, dtype = self._get_ot_batch()
         else:
+            x_0_pool = None
             x_1, mask, batch_shape, n, dtype = self.extract_clean_sample(batch)
             x_1 = self.fm._mask_and_zero_com(x_1, mask)
 
@@ -540,6 +553,7 @@ class ModelTrainerBase(L.LightningModule):
         if K == 1:
             combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir, raw_adp_wt_mean = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
+                x_0_override=x_0_pool,
             )
 
             self.log(
@@ -553,52 +567,52 @@ class ModelTrainerBase(L.LightningModule):
                 sync_dist=True,
                 add_dataloader_idx=False,
             )
-            if not val_step:
-                self.log(
-                    f"{log_prefix}/raw_loss_mf",
-                    raw_loss_mf,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=True,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.log(
-                    f"{log_prefix}/raw_loss_fm",
-                    raw_loss_fm,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=True,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.log(
-                    f"{log_prefix}/raw_loss_chirality",
-                    raw_loss_chir,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.log(
-                    f"{log_prefix}/raw_adp_wt_mean",
-                    raw_adp_wt_mean,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    batch_size=mask.shape[0],
-                    sync_dist=True,
-                    add_dataloader_idx=False,
-                )
+            self.log(
+                f"{log_prefix}/raw_loss_mf",
+                raw_loss_mf,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                f"{log_prefix}/raw_loss_fm",
+                raw_loss_fm,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                f"{log_prefix}/raw_loss_chirality",
+                raw_loss_chir,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
+            self.log(
+                f"{log_prefix}/raw_adp_wt_mean",
+                raw_adp_wt_mean,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=mask.shape[0],
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
 
+            if not val_step:
                 b, n = mask.shape
                 self.nsamples_processed = (
                     self.nsamples_processed + b * self.trainer.world_size

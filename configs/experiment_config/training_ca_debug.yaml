@@ -44,7 +44,7 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
-    noise_samples: 128
+    ot_pool_size: 128
   meanflow:
     # Current proteina defaults.
     # For reference, CIFAR10 MeanFlow v1 uses: ratio=0.75, P_mean_t=-0.6,
@@ -85,6 +85,7 @@ log:
   wandb_run_name: null
   log_wandb: True
   checkpoint: False    # No checkpoints for debug
+  top_k_by_val_rmsd_mf1: 3  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
 
 seed: 42
 
@@ -99,4 +100,9 @@ eval:
   every_n_steps: 1
   n_residues: 76
   ground_truth_pdb: ${oc.env:DATA_PATH}/debug/raw/1ubq.cif
-  nsamples: 1               # Number of generations per eval; chirality averaged over them
+  nsamples: 1                  # Number of generations per protein per mode; metrics averaged over draws.
+  val_enabled: false           # ProteinValEvalCallback; disabled for debug (empty val set).
+  n_val_proteins: 16
+  train_subset_enabled: false  # TrainSubsetRmsdCallback; disabled for debug.
+  n_train_proteins: 4
+  train_subset_seed: 42

@@ -50,6 +50,7 @@ training:
     reg: 0.05
     reg_m: 1.0
     normalize_cost: False
+    ot_pool_size: 128   # Enable streaming OT pool by setting to a multiple of batch_size; null disables it.
   meanflow:
     ratio: 0.25
     P_mean_t: -0.4
@@ -69,6 +70,8 @@ training:
 
 opt:
   lr: 0.0001
+  init_lr: 0.0  # Starting LR at the beginning of warmup (0 = warmup from zero)
+  end_lr: 0.0  # Minimum LR after decay (0 = decay all the way to zero)
   warmup_steps: 0  # Number of linear warmup steps (0 = no warmup)
   lr_decay_total_steps: 0  # Total steps for warmup + linear decay schedule (0 = constant LR)
   max_epochs: 10000000
@@ -80,13 +83,14 @@ opt:
   dist_strategy: ddp  # For multi GPU training, do not change
 
 log:
-  wandb_project: protein_transformer_big_runs  # Leave this so we can compare runs easily
+  wandb_project: meanflow-ot-proteina  # Leave this so we can compare runs easily
   wandb_entity: null  # W&B team/entity (null = personal account)
   wandb_run_name: null  # Display name override (null = use run_name_)
   log_wandb: True  # whether to log to wandb
   checkpoint: True  # whether to store checkpoints
   checkpoint_every_n_steps: 10000  # How often we store a checkpoint, should be greater than val_check_interval above
-  last_ckpt_every_n_steps: 3500  # How often do we update our last ckpt, needed for requeuing without losing progress
+  last_ckpt_every_n_steps: 3000  # How often do we update our last ckpt, needed for requeuing without losing progress
+  top_k_by_val_rmsd_mf1: 3  # Keep this many best-val-RMSD checkpoints (mode=min on val/rmsd_mf1). 0 = keep only the "last" ckpt.
 
 seed: 42
 
@@ -95,3 +99,15 @@ ema:
   validate_original_weights: False  # Whether to run validation on regular or EMA weights
   every_n_steps: 1  # Frequency of EMA updates
   cpu_offload: False  # Whether to offload EMA weights to cpu
+
+eval:
+  enabled: True                # Periodic ProteinEvalCallback (unconditional generation + viz)
+  every_n_steps: 1000          # How often ProteinEvalCallback runs (in training steps)
+  n_residues: 128              # Length of unconditionally generated proteins
+  nsamples: 3                  # Number of generations per protein per mode; metrics averaged over draws. Higher -> lower single-eval RMSD variance.
+  ground_truth_pdb: null       # Optional reference PDB for side-by-side viz (null = skip)
+  val_enabled: False           # ProteinValEvalCallback over first n_val_proteins of the val set
+  n_val_proteins: 48           # How many val proteins to track in ProteinValEvalCallback
+  train_subset_enabled: False  # TrainSubsetRmsdCallback (opt-in); paired train-vs-val RMSD
+  n_train_proteins: 48         # Subset size; mirror n_val_proteins for 1-to-1 variance
+  train_subset_seed: 42        # Deterministic subset; same seed -> same proteins across restarts

@@ -26,7 +26,7 @@ import loralib as lora
 import torch
 import wandb
 from dotenv import load_dotenv
-from lightning.pytorch.callbacks import LearningRateMonitor
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from lightning.pytorch.utilities import rank_zero_only
 from loguru import logger
@@ -48,6 +48,44 @@ from proteinfoundation.utils.training_analysis_utils import (
     StartupInfoCallback,
 )
 from proteinfoundation.callbacks.protein_eval import ProteinEvalCallback
+from proteinfoundation.callbacks.protein_train_eval import TrainSubsetRmsdCallback
+from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
+
+
+class GlobalStepWandbLogger(WandbLogger):
+    """WandbLogger that pins the ``trainer/global_step`` x-axis to the real
+    optimizer global_step.
+
+    Lightning's eval loop passes the per-dataloader val-batch counter as the
+    ``step`` argument to ``log_metrics`` (see ``evaluation_loop.py:459``),
+    which the stock WandbLogger writes verbatim into ``trainer/global_step``
+    — corrupting the x-axis for every ``val/*_step`` metric. This override
+    rewrites ``step`` from the attached trainer so the x-axis is always the
+    true optimizer step.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._trainer_ref = None
+
+    def attach_trainer(self, trainer):
+        self._trainer_ref = trainer
+
+    @rank_zero_only
+    def log_metrics(self, metrics, step=None):
+        if self._trainer_ref is not None:
+            step = int(self._trainer_ref.global_step)
+        return super().log_metrics(metrics, step=step)
+
+
+class AttachTrainerToLoggerCallback(Callback):
+    """Binds the trainer to ``GlobalStepWandbLogger`` as soon as setup runs,
+    so subsequent ``log_metrics`` calls can pull the real global_step."""
+
+    def setup(self, trainer, pl_module, stage):
+        for lg in trainer.loggers:
+            if isinstance(lg, GlobalStepWandbLogger):
+                lg.attach_trainer(trainer)
 
 
 # Things that should only be done by a single process
@@ -77,6 +115,63 @@ def log_configs(path_configs, wandb_logger, run_name):
 @rank_zero_only
 def create_dir(checkpoint_path_store, parents=True, exist_ok=True):
     Path(checkpoint_path_store).mkdir(parents=parents, exist_ok=exist_ok)
+
+
+def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
+    """Build the list of checkpoint callbacks.
+
+    Always returns the "last" ckpt callback (overwrites itself every
+    ``last_ckpt_every_n_steps`` steps, used for requeuing).
+
+    If ``cfg_log.top_k_by_val_rmsd_mf1`` > 0, additionally returns a top-k
+    callback that monitors ``val/rmsd_mf1`` (lower-is-better) and keeps the
+    best K checkpoints. Lightning evaluates the monitor at validation-end,
+    which is the natural cadence; do NOT set ``every_n_train_steps`` on the
+    top-k callback — it would couple to train steps and fire before the
+    monitor is populated.
+
+    Args:
+        checkpoint_path_store: directory where checkpoints are written.
+        cfg_log: OmegaConf-like log block with keys
+            ``last_ckpt_every_n_steps``, ``checkpoint_every_n_steps``,
+            ``top_k_by_val_rmsd_mf1`` (default 3).
+
+    Returns:
+        list of EmaModelCheckpoint callbacks (length 1 or 2).
+    """
+    args_ckpt_last = {
+        "dirpath": checkpoint_path_store,
+        "save_weights_only": False,
+        "filename": "ignore",
+        "every_n_train_steps": cfg_log.last_ckpt_every_n_steps,
+        "save_last": True,
+    }
+    callbacks = [EmaModelCheckpoint(**args_ckpt_last)]
+
+    top_k = int(cfg_log.get("top_k_by_val_rmsd_mf1", 3))
+    if top_k > 0:
+        args_ckpt_topk = {
+            "dirpath": checkpoint_path_store,
+            "save_last": False,
+            "save_weights_only": False,
+            "filename": "chk_{epoch:08d}_{step:012d}_{val/rmsd_mf1:.4f}",
+            "monitor": "val/rmsd_mf1",
+            "mode": "min",
+            "save_top_k": top_k,
+            "save_on_train_epoch_end": False,
+        }
+        callbacks.append(EmaModelCheckpoint(**args_ckpt_topk))
+        log_info(
+            f"Checkpointing: keeping top-{top_k} by val/rmsd_mf1 (mode=min) "
+            f"+ last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
+        )
+    else:
+        log_info(
+            f"Checkpointing: top-k disabled (top_k_by_val_rmsd_mf1=0); "
+            f"keeping only last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
+        )
+
+    return callbacks
 
 
 if __name__ == "__main__":
@@ -231,22 +326,14 @@ if __name__ == "__main__":
         # Generate a unique run ID so each restart creates a fresh WandB run
         # instead of resuming the previous one.
         wandb_run_id = wandb.util.generate_id()
-        wandb_logger = WandbLogger(
+        wandb_logger = GlobalStepWandbLogger(
             project=cfg_exp.log.wandb_project,
             id=wandb_run_id,
             entity=wandb_entity,
             name=wandb_run_name or run_name,
             config=OmegaConf.to_container(cfg_exp, resolve=True),
         )
-        # PL's WandbLogger doesn't pass explicit `step` to wandb.log(),
-        # so WandB auto-increments its internal counter on every call.
-        # With multiple log calls per optimizer step (step metrics, epoch
-        # metrics, LR monitor), the internal counter inflates vs global_step.
-        # Fix: tell WandB to use trainer/global_step as x-axis for everything.
-        # Access .experiment first to force WandbLogger to call wandb.init().
-        wandb_logger.experiment
-        wandb.define_metric("trainer/global_step")
-        wandb.define_metric("*", step_metric="trainer/global_step")
+        callbacks.append(AttachTrainerToLoggerCallback())
         callbacks.append(LogEpochTimeCallback())
         callbacks.append(LogSetpTimeCallback())
         callbacks.append(LearningRateMonitor(logging_interval="step"))
@@ -273,34 +360,42 @@ if __name__ == "__main__":
             )
         )
 
+    if eval_cfg is not None and eval_cfg.get("val_enabled", False) and wandb_logger is not None:
+        n_val = int(eval_cfg.get("n_val_proteins", 16))
+        val_nsamples = int(eval_cfg.get("nsamples", 1))
+        callbacks.append(
+            ProteinValEvalCallback(
+                run_name=run_name,
+                n_val_proteins=n_val,
+                nsamples=val_nsamples,
+            )
+        )
+
+    if (
+        eval_cfg is not None
+        and eval_cfg.get("train_subset_enabled", False)
+        and wandb_logger is not None
+    ):
+        n_train = int(eval_cfg.get("n_train_proteins", 16))
+        train_subset_nsamples = int(eval_cfg.get("nsamples", 1))
+        train_subset_seed = int(eval_cfg.get("train_subset_seed", 42))
+        callbacks.append(
+            TrainSubsetRmsdCallback(
+                run_name=run_name,
+                n_train_proteins=n_train,
+                nsamples=train_subset_nsamples,
+                seed=train_subset_seed,
+            )
+        )
+
     log_info(f"Using EMA with decay {cfg_exp.ema.decay}")
     callbacks.append(EMA(**cfg_exp.ema))
 
     # Set checkpointing
     if cfg_exp.log.checkpoint and not args.nolog:
-        args_ckpt_last = {
-            "dirpath": checkpoint_path_store,
-            "save_weights_only": False,
-            "filename": "ignore",
-            "every_n_train_steps": cfg_exp.log.last_ckpt_every_n_steps,
-            "save_last": True,
-        }
-        args_ckpt = {
-            "dirpath": checkpoint_path_store,
-            "save_last": False,
-            "save_weights_only": False,
-            "filename": "chk_{epoch:08d}_{step:012d}",
-            "every_n_train_steps": cfg_exp.log.checkpoint_every_n_steps,
-            "monitor": "train/loss",
-            "save_top_k": 10000,
-            "mode": "min",
-        }
-        checkpoint_callback = EmaModelCheckpoint(**args_ckpt)
-        checkpoint_callback_last = EmaModelCheckpoint(**args_ckpt_last)
-
         create_dir(checkpoint_path_store, parents=True, exist_ok=True)
-        callbacks.append(checkpoint_callback)
-        callbacks.append(checkpoint_callback_last)
+        ckpt_callbacks = _build_ckpt_callbacks(checkpoint_path_store, cfg_exp.log)
+        callbacks.extend(ckpt_callbacks)
 
         # Save and log config files
         path_configs = [
