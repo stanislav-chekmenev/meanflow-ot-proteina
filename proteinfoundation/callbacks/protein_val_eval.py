@@ -10,25 +10,23 @@
 
 import os
 
-import numpy as np
 import torch
 import wandb
 from lightning.pytorch.callbacks import Callback
 from loguru import logger
 
-from proteinfoundation.callbacks.protein_eval import (
-    ProteinEvalCallback,
-    _ca_rmsd,
-    _ca_rmsd_with_reflection,
-    _chirality_sign,
+from proteinfoundation.callbacks.protein_eval import ProteinEvalCallback
+from proteinfoundation.callbacks._sampling_utils import (
+    aggregate_log_dict,
+    build_samples_table,
+    current_optimizer_lr,
+    extract_gt_ca,
+    score_protein,
+    write_gt_pdb,
 )
-from proteinfoundation.utils.ff_utils.pdb_utils import write_prot_to_pdb
 
 # Project-level tmp directory (mirrors protein_eval.py convention).
 _PROJECT_TMP_DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "tmp")
-
-# C-alpha is at index 1 in the atom37 representation.
-_CA_INDEX = 1
 
 
 def _get_ema_context(trainer):
@@ -90,21 +88,12 @@ class ProteinValEvalCallback(Callback):
             graph = val_ds[i]
             pid = graph.id
 
-            # Extract CA coords; drop residues where CA mask is False.
-            ca_mask = graph.coord_mask[:, _CA_INDEX]  # [n_res] bool
-            gt_ca = graph.coords[:, _CA_INDEX, :][ca_mask].cpu().numpy()  # [m, 3]
-            n_res = gt_ca.shape[0]
-
+            gt_ca, n_res = extract_gt_ca(graph)
             if n_res == 0:
                 logger.warning(f"Skipping val protein {pid}: no valid CA atoms")
                 continue
 
-            # Write GT CA-only PDB.
-            atom37 = np.zeros((n_res, 37, 3), dtype=np.float32)
-            atom37[:, _CA_INDEX, :] = gt_ca
-            gt_path = os.path.join(self._tmp_dir, f"gt_{pid}.pdb")
-            write_prot_to_pdb(atom37, gt_path, overwrite=True, no_indexing=True)
-
+            gt_path = write_gt_pdb(gt_ca, pid, self._tmp_dir)
             proteins.append(
                 {
                     "id": pid,
@@ -162,196 +151,30 @@ class ProteinValEvalCallback(Callback):
             try:
                 with ema_ctx, torch.no_grad():
                     nsteps_base = getattr(pl_module, "meanflow_nsteps_sample", 1)
-
                     for protein in self._val_proteins:
-                        pid = protein["id"]
-                        n_res = protein["n_res"]
-                        gt_ca = protein["gt_ca"]
-
-                        # Averaging over self._nsamples independent draws
-                        # reduces the single-draw variance that otherwise
-                        # dominates val/rmsd_mf1 at small n_val_proteins.
-                        mf1_draws = []
-                        mf10x_draws = []
-                        for _ in range(self._nsamples):
-                            samples_mf1 = pl_module.generate(
-                                nsamples=1, n=n_res, nsteps=nsteps_base, mask=None
-                            )
-                            atom37_mf1 = (
-                                pl_module.samples_to_atom37(samples_mf1)
-                                .cpu()
-                                .numpy()
-                            )  # [1, n, 37, 3]
-                            gen_ca_mf1 = atom37_mf1[0, :, _CA_INDEX, :]
-
-                            samples_mf10x = pl_module.generate(
-                                nsamples=1,
-                                n=n_res,
-                                nsteps=nsteps_base * 10,
-                                mask=None,
-                            )
-                            atom37_mf10x = (
-                                pl_module.samples_to_atom37(samples_mf10x)
-                                .cpu()
-                                .numpy()
-                            )
-                            gen_ca_mf10x = atom37_mf10x[0, :, _CA_INDEX, :]
-
-                            mf1_draws.append(
-                                {
-                                    "atom37": atom37_mf1[0],
-                                    "gen_ca": gen_ca_mf1,
-                                    "rmsd": _ca_rmsd(gen_ca_mf1, gt_ca),
-                                    "rmsd_refl": _ca_rmsd_with_reflection(
-                                        gen_ca_mf1, gt_ca
-                                    ),
-                                    "chir": _chirality_sign(gen_ca_mf1, gt_ca),
-                                }
-                            )
-                            mf10x_draws.append(
-                                {
-                                    "atom37": atom37_mf10x[0],
-                                    "gen_ca": gen_ca_mf10x,
-                                    "rmsd": _ca_rmsd(gen_ca_mf10x, gt_ca),
-                                    "rmsd_refl": _ca_rmsd_with_reflection(
-                                        gen_ca_mf10x, gt_ca
-                                    ),
-                                    "chir": _chirality_sign(gen_ca_mf10x, gt_ca),
-                                }
-                            )
-
-                        # Representative draw for the table viewer = best rmsd.
-                        best_mf1 = min(mf1_draws, key=lambda d: d["rmsd"])
-                        best_mf10x = min(mf10x_draws, key=lambda d: d["rmsd"])
-
-                        pdb_mf1 = os.path.join(
-                            self._tmp_dir, f"gen_{pid}_mf1_step{step}.pdb"
-                        )
-                        write_prot_to_pdb(
-                            best_mf1["atom37"],
-                            pdb_mf1,
-                            overwrite=True,
-                            no_indexing=True,
-                        )
-                        pdb_mf10x = os.path.join(
-                            self._tmp_dir, f"gen_{pid}_mf10x_step{step}.pdb"
-                        )
-                        write_prot_to_pdb(
-                            best_mf10x["atom37"],
-                            pdb_mf10x,
-                            overwrite=True,
-                            no_indexing=True,
-                        )
-
                         per_protein_results.append(
-                            {
-                                "mf1_pdb": pdb_mf1,
-                                "mf10x_pdb": pdb_mf10x,
-                                "rmsd_mf1": float(
-                                    np.mean([d["rmsd"] for d in mf1_draws])
-                                ),
-                                "rmsd_mf10x": float(
-                                    np.mean([d["rmsd"] for d in mf10x_draws])
-                                ),
-                                "rmsd_refl_mf1": float(
-                                    np.mean([d["rmsd_refl"] for d in mf1_draws])
-                                ),
-                                "rmsd_refl_mf10x": float(
-                                    np.mean([d["rmsd_refl"] for d in mf10x_draws])
-                                ),
-                                "chir_mf1": float(
-                                    np.mean([d["chir"] for d in mf1_draws])
-                                ),
-                                "chir_mf10x": float(
-                                    np.mean([d["chir"] for d in mf10x_draws])
-                                ),
-                                "rmsd_mf1_best": float(best_mf1["rmsd"]),
-                                "rmsd_mf10x_best": float(best_mf10x["rmsd"]),
-                            }
+                            score_protein(
+                                pl_module,
+                                protein,
+                                nsamples=self._nsamples,
+                                nsteps_base=nsteps_base,
+                                tmp_dir=self._tmp_dir,
+                                step=step,
+                            )
                         )
             finally:
                 pl_module.train(was_training)
 
             # --- Log to wandb in a single batched call ---
-            log_dict = {}
-
-            # Pull current LR from the first optimizer's first param group so
-            # the per-row samples table is self-describing (which snapshot of
-            # the model does this row correspond to).
-            current_lr = None
-            try:
-                optimizers = trainer.optimizers
-                if optimizers:
-                    current_lr = float(optimizers[0].param_groups[0]["lr"])
-            except Exception:
-                current_lr = None
-
-            # Build the per-round protein sample table. One row per protein,
-            # with a global_step/lr prefix so a reader can tell which model
-            # snapshot the row came from (wandb keeps the last step's table
-            # visible by default).
-            table = wandb.Table(
-                columns=[
-                    "global_step",
-                    "lr",
-                    "protein_id",
-                    "rmsd_mf1",
-                    "rmsd_mf10x",
-                    "rmsd_reflected_mf1",
-                    "rmsd_reflected_mf10x",
-                    "chirality_mf1",
-                    "chirality_mf10x",
-                    "rmsd_mf1_best",
-                    "rmsd_mf10x_best",
-                    "ground_truth",
-                    "mf1",
-                    "mf10x",
-                ]
+            current_lr = current_optimizer_lr(trainer)
+            log_dict = aggregate_log_dict(
+                "val", self._val_proteins, per_protein_results, step
             )
-            for protein, res in zip(self._val_proteins, per_protein_results):
-                table.add_data(
-                    int(step),
-                    current_lr if current_lr is not None else float("nan"),
-                    protein["id"],
-                    float(res["rmsd_mf1"]),
-                    float(res["rmsd_mf10x"]),
-                    float(res["rmsd_refl_mf1"]),
-                    float(res["rmsd_refl_mf10x"]),
-                    float(res["chir_mf1"]),
-                    float(res["chir_mf10x"]),
-                    float(res["rmsd_mf1_best"]),
-                    float(res["rmsd_mf10x_best"]),
-                    wandb.Molecule(protein["gt_pdb_path"]),
-                    wandb.Molecule(res["mf1_pdb"]),
-                    wandb.Molecule(res["mf10x_pdb"]),
-                )
-            log_dict["samples/protein_table"] = table
-
-            log_dict["val/rmsd_mf1"] = float(
-                np.mean([r["rmsd_mf1"] for r in per_protein_results])
-            )
-            log_dict["val/rmsd_mf10x"] = float(
-                np.mean([r["rmsd_mf10x"] for r in per_protein_results])
-            )
-            log_dict["val/rmsd_reflected_mf1"] = float(
-                np.mean([r["rmsd_refl_mf1"] for r in per_protein_results])
-            )
-            log_dict["val/rmsd_reflected_mf10x"] = float(
-                np.mean([r["rmsd_refl_mf10x"] for r in per_protein_results])
-            )
-            log_dict["val/chirality_mf1"] = float(
-                np.mean([r["chir_mf1"] for r in per_protein_results])
-            )
-            log_dict["val/chirality_mf10x"] = float(
-                np.mean([r["chir_mf10x"] for r in per_protein_results])
-            )
-            log_dict["val/rmsd_mf1_best"] = float(
-                np.mean([r["rmsd_mf1_best"] for r in per_protein_results])
-            )
-            log_dict["val/rmsd_mf10x_best"] = float(
-                np.mean([r["rmsd_mf10x_best"] for r in per_protein_results])
+            log_dict["samples/protein_table"] = build_samples_table(
+                self._val_proteins, per_protein_results, step, current_lr
             )
             log_dict["trainer/global_step"] = step
+
             if pl_module.logger is not None:
                 pl_module.logger.experiment.log(log_dict, commit=False)
 

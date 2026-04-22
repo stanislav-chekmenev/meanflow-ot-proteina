@@ -48,6 +48,7 @@ from proteinfoundation.utils.training_analysis_utils import (
     StartupInfoCallback,
 )
 from proteinfoundation.callbacks.protein_eval import ProteinEvalCallback
+from proteinfoundation.callbacks.protein_train_eval import TrainSubsetRmsdCallback
 from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
 
 
@@ -310,6 +311,23 @@ if __name__ == "__main__":
                 run_name=run_name,
                 n_val_proteins=n_val,
                 nsamples=val_nsamples,
+            )
+        )
+
+    if (
+        eval_cfg is not None
+        and eval_cfg.get("train_subset_enabled", False)
+        and wandb_logger is not None
+    ):
+        n_train = int(eval_cfg.get("n_train_proteins", 16))
+        train_subset_nsamples = int(eval_cfg.get("nsamples", 1))
+        train_subset_seed = int(eval_cfg.get("train_subset_seed", 42))
+        callbacks.append(
+            TrainSubsetRmsdCallback(
+                run_name=run_name,
+                n_train_proteins=n_train,
+                nsamples=train_subset_nsamples,
+                seed=train_subset_seed,
             )
         )
 

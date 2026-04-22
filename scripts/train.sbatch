@@ -179,6 +179,9 @@ LR=1e-4
 EVAL_ENABLED=True
 EVAL_N_VAL_PROTEINS=48
 EVAL_NSAMPLES=3
+EVAL_TRAIN_SUBSET_ENABLED=True  # Paired train-subset RMSD for overfitting diagnosis
+EVAL_N_TRAIN_PROTEINS=48        # Mirror EVAL_N_VAL_PROTEINS for 1-to-1 variance
+EVAL_TRAIN_SUBSET_SEED=42
 
 # Self-conditioning
 SELF_COND=True
@@ -224,6 +227,9 @@ srun python "$CODE_ROOT/proteinfoundation/train.py" \
         eval.val_enabled=$EVAL_ENABLED \
         eval.n_val_proteins=$EVAL_N_VAL_PROTEINS \
         eval.nsamples=$EVAL_NSAMPLES \
+        eval.train_subset_enabled=$EVAL_TRAIN_SUBSET_ENABLED \
+        eval.n_train_proteins=$EVAL_N_TRAIN_PROTEINS \
+        eval.train_subset_seed=$EVAL_TRAIN_SUBSET_SEED \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.ot_coupling.ot_pool_size=$OT_POOL_SIZE \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \

@@ -287,11 +287,11 @@ class TestProteinValEvalCallback:
 
         with (
             mock.patch(
-                "proteinfoundation.callbacks.protein_val_eval.wandb.Molecule",
+                "proteinfoundation.callbacks._sampling_utils.wandb.Molecule",
                 return_value="fake-mol",
             ),
             mock.patch(
-                "proteinfoundation.callbacks.protein_val_eval.wandb.Table",
+                "proteinfoundation.callbacks._sampling_utils.wandb.Table",
                 side_effect=_table_factory,
             ),
         ):
