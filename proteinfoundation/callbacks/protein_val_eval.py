@@ -178,6 +178,24 @@ class ProteinValEvalCallback(Callback):
             if pl_module.logger is not None:
                 pl_module.logger.experiment.log(log_dict, commit=False)
 
+            # Also surface val/rmsd_mf1 to Lightning's callback_metrics so
+            # ModelCheckpoint(monitor="val/rmsd_mf1") can track it. The wandb
+            # experiment.log path above stays in place so the global_step
+            # x-axis fix keeps working; we pass logger=False here to avoid
+            # double-logging to wandb on the wrong step.
+            rmsd_mf1 = log_dict.get("val/rmsd_mf1")
+            if rmsd_mf1 is not None:
+                pl_module.log(
+                    "val/rmsd_mf1",
+                    float(rmsd_mf1),
+                    on_step=False,
+                    on_epoch=True,
+                    rank_zero_only=True,
+                    sync_dist=False,
+                    prog_bar=False,
+                    logger=False,
+                )
+
             logger.info(
                 f"ProteinValEvalCallback: logged metrics for "
                 f"{len(per_protein_results)} proteins at step {step} | "

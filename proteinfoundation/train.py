@@ -117,6 +117,63 @@ def create_dir(checkpoint_path_store, parents=True, exist_ok=True):
     Path(checkpoint_path_store).mkdir(parents=parents, exist_ok=exist_ok)
 
 
+def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
+    """Build the list of checkpoint callbacks.
+
+    Always returns the "last" ckpt callback (overwrites itself every
+    ``last_ckpt_every_n_steps`` steps, used for requeuing).
+
+    If ``cfg_log.top_k_by_val_rmsd_mf1`` > 0, additionally returns a top-k
+    callback that monitors ``val/rmsd_mf1`` (lower-is-better) and keeps the
+    best K checkpoints. Lightning evaluates the monitor at validation-end,
+    which is the natural cadence; do NOT set ``every_n_train_steps`` on the
+    top-k callback — it would couple to train steps and fire before the
+    monitor is populated.
+
+    Args:
+        checkpoint_path_store: directory where checkpoints are written.
+        cfg_log: OmegaConf-like log block with keys
+            ``last_ckpt_every_n_steps``, ``checkpoint_every_n_steps``,
+            ``top_k_by_val_rmsd_mf1`` (default 3).
+
+    Returns:
+        list of EmaModelCheckpoint callbacks (length 1 or 2).
+    """
+    args_ckpt_last = {
+        "dirpath": checkpoint_path_store,
+        "save_weights_only": False,
+        "filename": "ignore",
+        "every_n_train_steps": cfg_log.last_ckpt_every_n_steps,
+        "save_last": True,
+    }
+    callbacks = [EmaModelCheckpoint(**args_ckpt_last)]
+
+    top_k = int(cfg_log.get("top_k_by_val_rmsd_mf1", 3))
+    if top_k > 0:
+        args_ckpt_topk = {
+            "dirpath": checkpoint_path_store,
+            "save_last": False,
+            "save_weights_only": False,
+            "filename": "chk_{epoch:08d}_{step:012d}_{val/rmsd_mf1:.4f}",
+            "monitor": "val/rmsd_mf1",
+            "mode": "min",
+            "save_top_k": top_k,
+            "save_on_train_epoch_end": False,
+        }
+        callbacks.append(EmaModelCheckpoint(**args_ckpt_topk))
+        log_info(
+            f"Checkpointing: keeping top-{top_k} by val/rmsd_mf1 (mode=min) "
+            f"+ last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
+        )
+    else:
+        log_info(
+            f"Checkpointing: top-k disabled (top_k_by_val_rmsd_mf1=0); "
+            f"keeping only last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
+        )
+
+    return callbacks
+
+
 if __name__ == "__main__":
 
     load_dotenv()
@@ -336,27 +393,9 @@ if __name__ == "__main__":
 
     # Set checkpointing
     if cfg_exp.log.checkpoint and not args.nolog:
-        args_ckpt_last = {
-            "dirpath": checkpoint_path_store,
-            "save_weights_only": False,
-            "filename": "ignore",
-            "every_n_train_steps": cfg_exp.log.last_ckpt_every_n_steps,
-            "save_last": True,
-        }
-        args_ckpt = {
-            "dirpath": checkpoint_path_store,
-            "save_last": False,
-            "save_weights_only": False,
-            "filename": "chk_{epoch:08d}_{step:012d}",
-            "every_n_train_steps": cfg_exp.log.checkpoint_every_n_steps,
-            "save_top_k": -1,
-        }
-        checkpoint_callback = EmaModelCheckpoint(**args_ckpt)
-        checkpoint_callback_last = EmaModelCheckpoint(**args_ckpt_last)
-
         create_dir(checkpoint_path_store, parents=True, exist_ok=True)
-        callbacks.append(checkpoint_callback)
-        callbacks.append(checkpoint_callback_last)
+        ckpt_callbacks = _build_ckpt_callbacks(checkpoint_path_store, cfg_exp.log)
+        callbacks.extend(ckpt_callbacks)
 
         # Save and log config files
         path_configs = [
