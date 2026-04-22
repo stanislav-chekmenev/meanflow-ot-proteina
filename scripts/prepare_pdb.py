@@ -1,14 +1,17 @@
 """
-Prepare a ~10000-protein PDB dataset for MeanFlow training.
+Prepare a PDB dataset for MeanFlow training.
 
-Downloads CIF files, processes them into .pt graphs, writes the CSV index,
-runs mmseqs2 clustering, and creates train/val/test splits.
+Downloads CIF files, processes them into .pt graphs, writes the CSV index, and
+emits the input FASTA (`seq_<file_identifier>.fasta`) ready for mmseqs2.
 
 Usage:
-    DATA_PATH=/path/to/data python scripts/prepare_pdb_10k.py [--fraction 0.025]
+    DATA_PATH=/path/to/data python scripts/prepare_pdb.py [--fraction 0.5]
 
-The script is a thin wrapper around PDBLightningDataModule.prepare_data() and
-setup('fit').  All filtering, downloading, and processing logic lives there.
+The script is a thin wrapper around PDBLightningDataModule.prepare_data() plus
+the FASTA write from datasplitter.split_data(). The mmseqs2 clustering step and
+the train/val/test split are intentionally skipped here so prep can run on a
+node without mmseqs; run mmseqs separately on a machine that has it, then the
+trainer's setup('fit') will pick up the cluster files and build splits.
 """
 
 import argparse
@@ -28,8 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fraction",
         type=float,
-        default=0.008,
-        help="Fraction of PDB to use (default: 0.008, ~1000 chains).",
+        default=0.5,
+        help="Fraction of PDB to use",
     )
     return parser.parse_args()
 
@@ -72,32 +75,45 @@ def main() -> None:
     logger.info("Running prepare_data() ...")
     dm.prepare_data()
 
-    logger.info("Running setup('fit') ...")
-    dm.setup("fit")
+    if not dm.dataselector:
+        logger.info("No dataselector configured; skipping FASTA write.")
+        return
 
-    # Determine the CSV path for the user
-    csv_name = (
-        dm._get_file_identifier(dm.dataselector) + ".csv"
-        if dm.dataselector
-        else f"{dm.data_dir.name}.csv"
+    file_identifier = dm._get_file_identifier(dm.dataselector)
+    csv_path = dm.data_dir / f"{file_identifier}.csv"
+
+    import pandas as pd
+    from proteinfoundation.utils.cluster_utils import (
+        df_to_fasta,
+        setup_clustering_file_paths,
     )
-    csv_path = dm.data_dir / csv_name
 
-    train_size = len(dm.train_ds)
-    val_size = len(dm.val_ds)
-    # test_ds is only created for stage='test'; estimate from dfs_splits if available
-    if dm.test_ds is not None:
-        test_size = len(dm.test_ds)
+    df_data = pd.read_csv(csv_path)
+    n_rows = len(df_data)
+
+    sim = dm.datasplitter.split_sequence_similarity
+    input_fasta_filepath, cluster_fasta_filepath, cluster_tsv_filepath = (
+        setup_clustering_file_paths(dm.data_dir, file_identifier, sim)
+    )
+
+    if not input_fasta_filepath.exists():
+        logger.info(f"Writing input FASTA to {input_fasta_filepath}")
+        df_to_fasta(df=df_data, output_file=input_fasta_filepath)
     else:
-        test_split = dm.dfs_splits.get("test") if dm.dfs_splits is not None else None
-        test_size = len(test_split) if test_split is not None else None
+        logger.info(f"Input FASTA already exists, skipping: {input_fasta_filepath}")
 
-    logger.info("Dataset ready.")
+    logger.info("Dataset ready (prep only — run mmseqs2 next, then training will split).")
     print(f"\nDataset summary")
-    print(f"  train : {train_size}")
-    print(f"  val   : {val_size}")
-    print(f"  test  : {test_size if test_size is not None else '(not loaded)'}")
-    print(f"  CSV   : {csv_path}")
+    print(f"  rows       : {n_rows}")
+    print(f"  CSV        : {csv_path}")
+    print(f"  input FASTA: {input_fasta_filepath}")
+    print(f"\nNext step (on a node with mmseqs2 on PATH, from {dm.data_dir}):")
+    print(
+        f"  mmseqs easy-cluster {input_fasta_filepath.name} pdb_cluster tmp "
+        f"--min-seq-id {sim} -c 0.8 --cov-mode 1"
+    )
+    print(f"  mv pdb_cluster_rep_seq.fasta {cluster_fasta_filepath.name}")
+    print(f"  mv pdb_cluster_cluster.tsv   {cluster_tsv_filepath.name}")
 
 
 if __name__ == "__main__":
