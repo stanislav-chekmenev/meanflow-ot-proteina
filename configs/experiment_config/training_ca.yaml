@@ -60,14 +60,6 @@ training:
     norm_p: 1.0
     norm_eps: 0.001
     nsteps_sample: 1
-  chirality_loss:
-    enabled: False           # Opt-in chirality hinge loss (signed triple products)
-    weight: 1.0              # Multiplier on hinge loss in total loss
-    margin_alpha: 0.1        # Per-element margin as alpha * |T_gt_i|
-    stride: 1                # Stride k for triple-product window
-    t_gate_max: 1.0          # Upper t cutoff for applying the hinge (default 1.0 = no gate)
-    t_gate_mode: "hard"      # "hard" (indicator) or "soft" (sigmoid)
-
 opt:
   lr: 0.0001
   init_lr: 0.0  # Starting LR at the beginning of warmup (0 = warmup from zero)

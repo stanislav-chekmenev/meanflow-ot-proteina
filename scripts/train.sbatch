@@ -199,23 +199,14 @@ LR=1e-4
 # rm them manually before the run if you want a clean store/<run>/checkpoints/ dir).
 RESUME_FROM_LAST_CKPT=False
 
-# Eval
+# Eval (SamplesLoggingCallback — see eval block in training_ca.yaml)
 EVAL_ENABLED=True
-EVAL_N_VAL_PROTEINS=48
-EVAL_NSAMPLES=3
-EVAL_TRAIN_SUBSET_ENABLED=True  # Paired train-subset RMSD for overfitting diagnosis
-EVAL_N_TRAIN_PROTEINS=48        # Mirror EVAL_N_VAL_PROTEINS for 1-to-1 variance
-EVAL_TRAIN_SUBSET_SEED=42
+EVAL_N_SAMPLES=8
+EVAL_LENGTHS="[64,128,192,256]"
 
 # Self-conditioning
 SELF_COND=True
 SELF_COND_PROB=0.5
-
-# Chirality hinge loss
-CHIRALITY_ENABLED=False
-CHIRALITY_WEIGHT=1.0
-CHIRALITY_MARGIN_ALPHA=0.1
-CHIRALITY_STRIDE=1
 
 # Dataset config
 DATAMODULE_BATCH_SIZE=4
@@ -255,22 +246,13 @@ srun --kill-on-bad-exit=1 python "$CODE_ROOT/proteinfoundation/train.py" \
         opt.lr_decay_total_steps=$LR_DECAY_TOTAL_STEPS \
         opt.val_check_interval=$VAL_CHECK_INTERVAL_BATCHES \
         log.resume_from_last_ckpt=$RESUME_FROM_LAST_CKPT \
-        eval.val_enabled=$EVAL_ENABLED \
-        eval.n_val_proteins=$EVAL_N_VAL_PROTEINS \
-        eval.nsamples=$EVAL_NSAMPLES \
-        eval.train_subset_enabled=$EVAL_TRAIN_SUBSET_ENABLED \
-        eval.n_train_proteins=$EVAL_N_TRAIN_PROTEINS \
-        eval.train_subset_seed=$EVAL_TRAIN_SUBSET_SEED \
+        eval.enabled=$EVAL_ENABLED \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.ot_coupling.ot_pool_size=$OT_POOL_SIZE \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
         training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
         training.self_cond=$SELF_COND \
         training.self_cond_prob=$SELF_COND_PROB \
-        training.chirality_loss.enabled=$CHIRALITY_ENABLED \
-        training.chirality_loss.weight=$CHIRALITY_WEIGHT \
-        training.chirality_loss.margin_alpha=$CHIRALITY_MARGIN_ALPHA \
-        training.chirality_loss.stride=$CHIRALITY_STRIDE \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
     --data_overrides \

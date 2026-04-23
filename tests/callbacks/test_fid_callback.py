@@ -9,6 +9,8 @@ import pytest
 import torch
 from torch_geometric.data import Batch
 
+import proteinfoundation.callbacks.fid_callback  # ensure submodule is registered before mock.patch resolves it
+
 
 # ---------------------------------------------------------------------------
 # Helpers
