@@ -150,6 +150,12 @@ class FIDCallback(L.Callback):
         was_training = pl_module.training
         pl_module.eval()
 
+        # Reset CUDA peak-memory counter so val/fid_peak_vram_gb reports the
+        # peak VRAM used by THIS FID firing only (not lifetime-peak).
+        device = pl_module.device
+        if torch.cuda.is_available() and device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+
         try:
             ema_ctx = self._get_ema_context(trainer)
             with ema_ctx, torch.no_grad():
@@ -200,7 +206,24 @@ class FIDCallback(L.Callback):
             sync_dist=False,
         )
 
-        # 12. Also emit trainer/global_step to WandB so the x-axis is correct
+        # 12. Log peak VRAM for this FID firing so the first run tells us
+        # whether generation_batch_size needs tuning before the next eval.
+        # reset_peak_memory_stats was called before generation, so this is
+        # the peak used by the FID path only.
+        if torch.cuda.is_available() and device.type == "cuda":
+            peak_bytes = torch.cuda.max_memory_allocated(device)
+            peak_gb = peak_bytes / (1024 ** 3)
+            pl_module.log(
+                "val/fid_peak_vram_gb",
+                peak_gb,
+                rank_zero_only=True,
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+                sync_dist=False,
+            )
+
+        # 13. Also emit trainer/global_step to WandB so the x-axis is correct
         # (mirrors SamplesLoggingCallback pattern; commit=False defers the flush).
         if trainer.global_rank == 0:
             pl_module.logger.experiment.log(

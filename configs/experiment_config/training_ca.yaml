@@ -106,6 +106,6 @@ fid:
   n_samples: 5000
   lengths: [64, 100, 128, 150, 192, 200, 250, 256]
   nsteps: 1
-  generation_batch_size: 32
+  generation_batch_size: 4  # Match train_per_gpu_batch (train uses ~85-90% of 96GB -> little headroom)
   gearnet_ckpt_path: ./data/metric_factory/model_weights/gearnet_ca.pth
   real_features_path: ./data/metric_factory/features/pdb_eval_ca_features.pth
