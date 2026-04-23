@@ -154,8 +154,7 @@ class FIDCallback(L.Callback):
             ema_ctx = self._get_ema_context(trainer)
             with ema_ctx, torch.no_grad():
                 # Group by length and process in chunks of generation_batch_size
-                # Build list of (length, count) by grouping the round-robin list
-                from collections import Counter
+                # Build list of (length, count) by grouping the round-robin list.
                 length_counts = {}
                 for ln in per_rank_lengths:
                     length_counts[ln] = length_counts.get(ln, 0) + 1
