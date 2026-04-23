@@ -278,3 +278,161 @@ class TestSamplesLoggingCallback:
         assert "step" not in kwargs, (
             f"log must not be called with step= kwarg; got kwargs={kwargs!r}"
         )
+
+    # ----- Gap-filling tests added after first-pass TDD -----
+
+    def test_temp_pdb_files_deleted_after_log(self, monkeypatch, tmp_path):
+        """PDB files written during a firing must be deleted after wandb log returns."""
+        # Use a write_prot_to_pdb that creates a real file so cleanup has something to delete.
+        def real_write(arr, path, overwrite=True, no_indexing=True):
+            with open(path, "w") as f:
+                f.write("HEADER fake pdb\n")
+
+        monkeypatch.setattr(
+            "proteinfoundation.callbacks.protein_val_eval.write_prot_to_pdb",
+            real_write,
+        )
+        self._patch_wandb_molecule(monkeypatch)
+
+        logged_calls = []
+        pl_module = _make_pl_module(experiment_log=lambda d, **kw: logged_calls.append((dict(d), kw)))
+
+        cb = _make_callback(every_n_steps=100, n_samples=4, lengths=[64, 128])
+        cb._tmp_dir = str(tmp_path)
+
+        trainer = _make_trainer(global_step=100)
+        cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+
+        # tmp_path should contain no leftover .pdb files after the callback returns.
+        leftover = [f for f in os.listdir(tmp_path) if f.endswith(".pdb")]
+        assert leftover == [], (
+            f"temp PDBs must be deleted after log(); leftover: {leftover}"
+        )
+
+    def test_train_mode_restored_even_if_generate_raises(self, monkeypatch, tmp_path):
+        """pl_module.train(was_training) must run in the finally block even if generate raises."""
+        self._patch_write_pdb(monkeypatch)
+        self._patch_wandb_molecule(monkeypatch)
+
+        pl_module = _make_pl_module()
+        pl_module.training = True  # start in train mode
+
+        def boom(nsamples, n, nsteps, mask=None):
+            raise RuntimeError("simulated generation failure")
+
+        pl_module.generate = boom
+
+        cb = _make_callback(every_n_steps=100, n_samples=2, lengths=[64])
+        cb._tmp_dir = str(tmp_path)
+
+        trainer = _make_trainer(global_step=100)
+
+        with pytest.raises(RuntimeError, match="simulated generation failure"):
+            cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+
+        pl_module.train.assert_called_with(True)
+
+    def test_ema_context_entered_when_ema_optimizer_present(self, monkeypatch, tmp_path):
+        """If trainer.optimizers contains an EMAOptimizer, its swap_ema_weights context is entered."""
+        import proteinfoundation.callbacks.protein_val_eval as pve_mod
+
+        self._patch_write_pdb(monkeypatch)
+        self._patch_wandb_molecule(monkeypatch)
+
+        pl_module = _make_pl_module(experiment_log=lambda d, **kw: None)
+
+        cb = _make_callback(every_n_steps=100, n_samples=2, lengths=[64])
+        cb._tmp_dir = str(tmp_path)
+
+        entered = {"flag": False}
+
+        class _FakeEmaCtx:
+            def __enter__(self_inner):
+                entered["flag"] = True
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc, tb):
+                return False
+
+        fake_opt = mock.MagicMock()
+        fake_opt.swap_ema_weights.return_value = _FakeEmaCtx()
+
+        with mock.patch.object(pve_mod, "EMAOptimizer", type(fake_opt)):
+            trainer = _make_trainer(global_step=100)
+            trainer.optimizers = [fake_opt]
+            cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+
+        assert entered["flag"] is True, "EMA swap context must be entered when EMAOptimizer is present"
+        fake_opt.swap_ema_weights.assert_called_once()
+
+    def test_lr_none_logged_as_nan_in_table(self, monkeypatch, tmp_path):
+        """If current_optimizer_lr returns None, the 'lr' column should be NaN (not None)."""
+        import math
+
+        self._patch_write_pdb(monkeypatch)
+        self._patch_wandb_molecule(monkeypatch)
+
+        # Force current_optimizer_lr to return None.
+        monkeypatch.setattr(
+            "proteinfoundation.callbacks.protein_val_eval.current_optimizer_lr",
+            lambda trainer: None,
+        )
+
+        logged_calls = []
+        pl_module = _make_pl_module(experiment_log=lambda d, **kw: logged_calls.append((dict(d), kw)))
+
+        cb = _make_callback(every_n_steps=100, n_samples=2, lengths=[64])
+        cb._tmp_dir = str(tmp_path)
+
+        trainer = _make_trainer(global_step=100)
+        cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+
+        table = logged_calls[0][0]["samples/free_gen_table"]
+        # lr column is index 1
+        for row in table.data:
+            assert math.isnan(row[1]), f"lr column should be NaN when lr is None; got {row[1]!r}"
+
+    def test_log_dict_contains_global_step(self, monkeypatch, tmp_path):
+        """The logged dict must carry trainer/global_step alongside the samples table."""
+        self._patch_write_pdb(monkeypatch)
+        self._patch_wandb_molecule(monkeypatch)
+
+        logged_calls = []
+        pl_module = _make_pl_module(experiment_log=lambda d, **kw: logged_calls.append((dict(d), kw)))
+
+        cb = _make_callback(every_n_steps=100, n_samples=2, lengths=[64])
+        cb._tmp_dir = str(tmp_path)
+
+        trainer = _make_trainer(global_step=100)
+        cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+
+        log_dict = logged_calls[0][0]
+        assert "trainer/global_step" in log_dict, (
+            f"log dict must contain 'trainer/global_step'; got keys={list(log_dict.keys())}"
+        )
+        assert log_dict["trainer/global_step"] == 100
+
+    def test_write_prot_to_pdb_called_once_per_sample(self, monkeypatch, tmp_path):
+        """write_prot_to_pdb is called exactly n_samples times (one per generated structure)."""
+        write_calls = []
+
+        def tracking_write(arr, path, overwrite=True, no_indexing=True):
+            write_calls.append(path)
+
+        monkeypatch.setattr(
+            "proteinfoundation.callbacks.protein_val_eval.write_prot_to_pdb",
+            tracking_write,
+        )
+        self._patch_wandb_molecule(monkeypatch)
+
+        pl_module = _make_pl_module(experiment_log=lambda d, **kw: None)
+
+        cb = _make_callback(every_n_steps=100, n_samples=6, lengths=[64, 128, 192])
+        cb._tmp_dir = str(tmp_path)
+
+        trainer = _make_trainer(global_step=100)
+        cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+
+        assert len(write_calls) == 6, (
+            f"write_prot_to_pdb must be called once per sample (n_samples=6); got {len(write_calls)}"
+        )

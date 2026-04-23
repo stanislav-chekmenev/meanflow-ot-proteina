@@ -130,3 +130,59 @@ def test_build_ckpt_callbacks_reads_top_k_by_val_loss(tmp_path):
     assert len(cbs) == 2
     monitor_cb = next(c for c in cbs if getattr(c, "monitor", None) == "val/raw_loss_mf_epoch")
     assert monitor_cb.save_top_k == 5
+
+
+# ---------------------------------------------------------------------------
+# Test 5: filename template of the built monitor callback embeds the monitor key
+# ---------------------------------------------------------------------------
+
+
+def test_built_monitor_callback_filename_template_embeds_monitor_key(tmp_path):
+    """The top-k callback built by _build_ckpt_callbacks must embed val/raw_loss_mf_epoch in its filename.
+
+    Without this, Lightning cannot format the monitored value into the saved filename,
+    making inspection of best-vs-last checkpoints ambiguous.
+    """
+    from proteinfoundation.train import _build_ckpt_callbacks
+
+    cbs = _build_ckpt_callbacks(str(tmp_path), _make_log_cfg(3))
+    monitor_cb = next(c for c in cbs if getattr(c, "monitor", None) == "val/raw_loss_mf_epoch")
+    assert "val/raw_loss_mf_epoch" in monitor_cb.filename, (
+        f"Expected 'val/raw_loss_mf_epoch' in filename template; got {monitor_cb.filename!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: mode='min' on the built monitor callback (not just the manually-made one)
+# ---------------------------------------------------------------------------
+
+
+def test_built_monitor_callback_mode_is_min(tmp_path):
+    """_build_ckpt_callbacks must set mode='min' on the monitor callback — lower val loss is better."""
+    from proteinfoundation.train import _build_ckpt_callbacks
+
+    cbs = _build_ckpt_callbacks(str(tmp_path), _make_log_cfg(3))
+    monitor_cb = next(c for c in cbs if getattr(c, "monitor", None) == "val/raw_loss_mf_epoch")
+    assert monitor_cb.mode == "min", (
+        f"monitor callback must use mode='min'; got {monitor_cb.mode!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: built "last" callback has no monitor (so it never trips the top-k logic)
+# ---------------------------------------------------------------------------
+
+
+def test_built_last_callback_has_no_monitor(tmp_path):
+    """The save_last callback in _build_ckpt_callbacks must not have a monitor set.
+
+    It fires on a fixed step cadence, not on val-loss improvement.
+    """
+    from proteinfoundation.train import _build_ckpt_callbacks
+
+    cbs = _build_ckpt_callbacks(str(tmp_path), _make_log_cfg(3))
+    last_cb = next(c for c in cbs if getattr(c, "monitor", None) != "val/raw_loss_mf_epoch")
+    assert last_cb.monitor is None, (
+        f"'last' callback must have monitor=None; got {last_cb.monitor!r}"
+    )
+    assert last_cb.save_last is True
