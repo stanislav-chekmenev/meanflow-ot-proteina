@@ -119,17 +119,6 @@ class Proteina(ModelTrainerBase):
         # Self-conditioning (opt-in, wired through _compute_single_noise_loss).
         self.self_cond_prob = cfg_exp.training.get("self_cond_prob", 0.5)
 
-        # Chirality hinge loss (opt-in).
-        chir_cfg = cfg_exp.training.get("chirality_loss", {})
-        self.chirality_loss_enabled = chir_cfg.get("enabled", False)
-        self.chirality_loss_weight = chir_cfg.get("weight", 1.0)
-        self.chirality_margin_alpha = chir_cfg.get("margin_alpha", 0.1)
-        self.chirality_stride = chir_cfg.get("stride", 1)
-        # t-gate for the chirality hinge (hyp/t-gate-chir). Defaults are the
-        # identity gate so existing configs behave unchanged.
-        self.chirality_t_gate_max = float(chir_cfg.get("t_gate_max", 1.0))
-        self.chirality_t_gate_mode = str(chir_cfg.get("t_gate_mode", "hard"))
-
         # Neural network
         # JVP incompatible with torch.utils.checkpoint (used in PairReprUpdate)
         assert not cfg_exp.model.nn.get(

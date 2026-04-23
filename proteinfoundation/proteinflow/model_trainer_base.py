@@ -25,11 +25,6 @@ from loguru import logger
 from torch import Tensor
 
 from proteinfoundation.utils.ff_utils.pdb_utils import mask_cath_code_by_level
-from proteinfoundation.proteinflow.chirality_loss import (
-    chirality_hinge_loss,
-    chirality_hinge_loss_per_sample,
-)
-
 
 class ModelTrainerBase(L.LightningModule):
     def __init__(self, cfg_exp, store_dir=None):
@@ -263,9 +258,7 @@ class ModelTrainerBase(L.LightningModule):
         the SAME (norm_p, norm_eps) used by ``adaptive_loss``.
 
         Returns a tensor of ones with ``loss``'s shape/device when the knobs
-        are absent (so downstream multipliers are no-ops). Sharing this
-        computation between MF and auxiliary losses (e.g. chirality) keeps
-        their relative scale invariant under ``norm_p``.
+        are absent (so downstream multipliers are no-ops).
         """
         norm_p = self.cfg_exp.training.meanflow.get("norm_p", None)
         norm_eps = self.cfg_exp.training.meanflow.get("norm_eps", None)
@@ -300,9 +293,8 @@ class ModelTrainerBase(L.LightningModule):
             combined_adp_loss: scalar tensor (requires_grad=True)
             raw_loss_mf: scalar tensor (detached mean, for logging)
             raw_loss_fm: scalar tensor (detached mean, for logging)
-            raw_loss_chir: scalar tensor (detached, for logging; zero when disabled)
             raw_adp_wt_mean: scalar tensor (detached mean of per-sample adp_wt,
-                for logging the shared MF/chirality scaling knob)
+                for logging the MF adaptive scaling knob)
         """
         n = x_1.shape[-2]
         dtype = x_1.dtype
@@ -381,10 +373,6 @@ class ModelTrainerBase(L.LightningModule):
         error = (u_pred - u_tgt) * mask[..., None]
         loss_mf = (error ** 2).sum(dim=(-1, -2)) / nres
         raw_loss_mf = loss_mf.mean().detach() # use for logging, before adaptive weighting
-        # Compute adp_wt ONCE from the per-sample MF loss and reuse it for
-        # both the MF-side division (via adaptive_loss) and the chirality
-        # scaling below. At norm_p=0, adp_wt is identically 1 → backward
-        # compatible with the baseline.
         adp_wt_mf = self._compute_adp_wt(loss_mf)
         raw_adp_wt_mean = adp_wt_mf.mean().detach()
         loss_mf = self.adaptive_loss(loss_mf).mean()
@@ -401,63 +389,7 @@ class ModelTrainerBase(L.LightningModule):
         # 6. Combined
         combined_adp_loss = (1 - mf_ratio) * loss_fm + mf_ratio * loss_mf
 
-        # 7. Chirality hinge loss (optional, with optional t-gate)
-        raw_loss_chir = torch.zeros((), device=self.device)
-        if self.chirality_loss_enabled and self.chirality_loss_weight > 0:
-            # Recover x_1 prediction from the FM sub-pass velocity:
-            # z = (1-t)*x_1 + t*x_0  =>  x_1 ≈ z - t * v  (at r=t).
-            x_1_pred = z - t_ext * v_pred
-            x_1_pred = self.fm._mask_and_zero_com(x_1_pred, mask)
-            # Per-sample hinge so we can apply a per-sample t-gate before
-            # reducing.
-            loss_chir_per_sample = chirality_hinge_loss_per_sample(
-                x_pred=x_1_pred,
-                x_gt=x_1,
-                mask=mask,
-                margin_alpha=self.chirality_margin_alpha,
-                stride=self.chirality_stride,
-            )  # [B]
-
-            # t-gate: only fire the chirality hinge for low t (near clean data),
-            # where `x_1_pred = z - t*v` approximates x_1 well. At high t, the
-            # prediction is dominated by noise and T_pred is uninformative;
-            # firing the hinge there averages high-variance/low-signal into
-            # the gradient and masks the MeanFlow signal.
-            #
-            # `t_gate_max == 1.0` + "hard" is the identity gate (no change in
-            # behaviour vs. ungated chirality) — preserves backwards-compat
-            # when the new config keys are absent.
-            t_gate_max = float(self.chirality_t_gate_max)
-            t_gate_mode = str(self.chirality_t_gate_mode)
-            if t_gate_mode == "hard":
-                gate = (t < t_gate_max).to(loss_chir_per_sample.dtype)
-            elif t_gate_mode == "soft":
-                # Smooth sigmoid gate: ~1 for t << t_gate_max, ~0 for t >> t_gate_max.
-                # Scale picks `t_gate_max` itself (clamped) as the transition width
-                # so the gate is self-scaling without extra hyperparameters.
-                t_sharpness = max(t_gate_max, 1e-3)
-                gate = torch.sigmoid((t_gate_max - t) / t_sharpness).to(
-                    loss_chir_per_sample.dtype
-                )
-            else:
-                raise ValueError(
-                    f"Unknown chirality t_gate_mode: {t_gate_mode!r}; expected 'hard' or 'soft'."
-                )
-
-            gated = loss_chir_per_sample * gate  # [B]
-            loss_chir = gated.mean()
-            raw_loss_chir = loss_chir.detach()
-            # Apply the SAME per-step adp_wt used on the MF loss so MF and
-            # chirality gradients stay at the same scale under norm_p > 0.
-            # chirality_hinge_loss returns a scalar; adp_wt_mf is per-sample
-            # ([B]), so we divide by its batch-mean (detached, already
-            # detached inside _compute_adp_wt). At norm_p=0 this mean == 1,
-            # so the branch is numerically identical to the baseline.
-            adp_wt_chir = adp_wt_mf.mean()
-            loss_chir_scaled = loss_chir / adp_wt_chir
-            combined_adp_loss = combined_adp_loss + self.chirality_loss_weight * loss_chir_scaled
-
-        return combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir, raw_adp_wt_mean
+        return combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_adp_wt_mean
 
     def training_step(self, batch, batch_idx, *, val_step=False):
         """
@@ -551,7 +483,7 @@ class ModelTrainerBase(L.LightningModule):
 
         # --- 3. K=1 path (automatic optimization, identical to pre-refactor behavior) ---
         if K == 1:
-            combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_loss_chir, raw_adp_wt_mean = self._compute_single_noise_loss(
+            combined_adp_loss, raw_loss_mf, raw_loss_fm, raw_adp_wt_mean = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
                 x_0_override=x_0_pool,
             )
@@ -584,17 +516,6 @@ class ModelTrainerBase(L.LightningModule):
                 on_step=True,
                 on_epoch=True,
                 prog_bar=True,
-                logger=True,
-                batch_size=mask.shape[0],
-                sync_dist=True,
-                add_dataloader_idx=False,
-            )
-            self.log(
-                f"{log_prefix}/raw_loss_chirality",
-                raw_loss_chir,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
                 logger=True,
                 batch_size=mask.shape[0],
                 sync_dist=True,
@@ -645,23 +566,20 @@ class ModelTrainerBase(L.LightningModule):
 
         total_loss_mf = 0.0
         total_loss_fm = 0.0
-        total_loss_chir = 0.0
         total_adp_wt = 0.0
 
         for _ in range(K):
-            loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_loss_chir_k, raw_adp_wt_mean_k = self._compute_single_noise_loss(
+            loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_adp_wt_mean_k = self._compute_single_noise_loss(
                 x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
             )
             # Backward with 1/K scaling so accumulated gradient == mean gradient
             self.manual_backward(loss_k / K)
             total_loss_mf += raw_loss_mf_k.item()
             total_loss_fm += raw_loss_fm_k.item()
-            total_loss_chir += raw_loss_chir_k.item()
             total_adp_wt += raw_adp_wt_mean_k.item()
 
         avg_loss_mf = total_loss_mf / K
         avg_loss_fm = total_loss_fm / K
-        avg_loss_chir = total_loss_chir / K
         avg_adp_wt = total_adp_wt / K
         mf_ratio = self.cfg_exp.training.meanflow.ratio
         avg_combined = (1 - mf_ratio) * avg_loss_fm + mf_ratio * avg_loss_mf
@@ -680,11 +598,6 @@ class ModelTrainerBase(L.LightningModule):
         self.log(
             f"{log_prefix}/raw_loss_fm", avg_loss_fm,
             on_step=True, on_epoch=True, prog_bar=True, logger=True,
-            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
-        )
-        self.log(
-            f"{log_prefix}/raw_loss_chirality", avg_loss_chir,
-            on_step=True, on_epoch=True, prog_bar=False, logger=True,
             batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
         )
         self.log(
