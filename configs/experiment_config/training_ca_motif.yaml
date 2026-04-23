@@ -70,7 +70,7 @@ log:
   resume_from_last_ckpt: True  # If True and last.ckpt exists, resume from it; if False, ignore any existing ckpt and start fresh (old ckpts are NOT deleted)
   checkpoint_every_n_steps: 10000  # Optimizer steps (trainer.global_step) — unlike val_check_interval, NOT affected by accumulate_grad_batches
   last_ckpt_every_n_steps: 3500  # Optimizer steps between "last" ckpt updates (for requeuing); same unit as checkpoint_every_n_steps
-  top_k_by_val_rmsd_mf1: 3  # Keep this many best-val-RMSD checkpoints (mode=min on val/rmsd_mf1). 0 = keep only the "last" ckpt.
+  top_k_by_val_loss: 3  # Keep this many best-val-loss checkpoints (mode=min on val/raw_loss_mf_epoch). 0 = keep only the "last" ckpt.
 
 seed: 42
 

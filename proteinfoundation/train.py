@@ -123,18 +123,21 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
     Always returns the "last" ckpt callback (overwrites itself every
     ``last_ckpt_every_n_steps`` steps, used for requeuing).
 
-    If ``cfg_log.top_k_by_val_rmsd_mf1`` > 0, additionally returns a top-k
-    callback that monitors ``val/rmsd_mf1`` (lower-is-better) and keeps the
-    best K checkpoints. Lightning evaluates the monitor at validation-end,
-    which is the natural cadence; do NOT set ``every_n_train_steps`` on the
-    top-k callback — it would couple to train steps and fire before the
-    monitor is populated.
+    If ``cfg_log.top_k_by_val_loss`` > 0, additionally returns a top-k
+    callback that monitors ``val/raw_loss_mf_epoch`` (lower-is-better) and
+    keeps the best K checkpoints. ``val/raw_loss_mf_epoch`` is the core
+    MeanFlow objective logged with ``on_epoch=True, sync_dist=True`` in
+    ``model_trainer_base.py``; Lightning emits it into ``callback_metrics``
+    automatically at validation-end on every DDP rank — no custom broadcast
+    needed. Lightning evaluates the monitor at validation-end, which is the
+    natural cadence; do NOT set ``every_n_train_steps`` on the top-k callback
+    — it would couple to train steps and fire before the monitor is populated.
 
     Args:
         checkpoint_path_store: directory where checkpoints are written.
         cfg_log: OmegaConf-like log block with keys
             ``last_ckpt_every_n_steps``, ``checkpoint_every_n_steps``,
-            ``top_k_by_val_rmsd_mf1`` (default 3).
+            ``top_k_by_val_loss`` (default 3).
 
     Returns:
         list of EmaModelCheckpoint callbacks (length 1 or 2).
@@ -148,26 +151,26 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
     }
     callbacks = [EmaModelCheckpoint(**args_ckpt_last)]
 
-    top_k = int(cfg_log.get("top_k_by_val_rmsd_mf1", 3))
+    top_k = int(cfg_log.get("top_k_by_val_loss", 3))
     if top_k > 0:
         args_ckpt_topk = {
             "dirpath": checkpoint_path_store,
             "save_last": False,
             "save_weights_only": False,
-            "filename": "chk_{epoch:08d}_{step:012d}_{val/rmsd_mf1:.4f}",
-            "monitor": "val/rmsd_mf1",
+            "filename": "chk_{epoch:08d}_{step:012d}_{val/raw_loss_mf_epoch:.6f}",
+            "monitor": "val/raw_loss_mf_epoch",
             "mode": "min",
             "save_top_k": top_k,
             "save_on_train_epoch_end": False,
         }
         callbacks.append(EmaModelCheckpoint(**args_ckpt_topk))
         log_info(
-            f"Checkpointing: keeping top-{top_k} by val/rmsd_mf1 (mode=min) "
+            f"Checkpointing: keeping top-{top_k} by val/raw_loss_mf_epoch (mode=min) "
             f"+ last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
         )
     else:
         log_info(
-            f"Checkpointing: top-k disabled (top_k_by_val_rmsd_mf1=0); "
+            f"Checkpointing: top-k disabled (top_k_by_val_loss=0); "
             f"keeping only last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
         )
 

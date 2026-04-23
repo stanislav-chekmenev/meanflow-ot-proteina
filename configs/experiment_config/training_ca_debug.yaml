@@ -86,7 +86,7 @@ log:
   log_wandb: True
   checkpoint: False    # No checkpoints for debug
   resume_from_last_ckpt: True  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
-  top_k_by_val_rmsd_mf1: 3  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
+  top_k_by_val_loss: 3  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
 
 seed: 42
 
