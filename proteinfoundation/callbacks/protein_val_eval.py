@@ -117,94 +117,105 @@ class ProteinValEvalCallback(Callback):
 
     # ------------------------------------------------------------------
     def on_validation_epoch_end(self, trainer, pl_module):
-        """Generate samples for cached val proteins and log metrics to wandb."""
+        """Generate samples for cached val proteins and log metrics to wandb.
+
+        Rank 0 runs the expensive sample generation; the resulting
+        ``val/rmsd_mf1`` scalar is then broadcast to all DDP ranks so every
+        rank participates in ``pl_module.log(...)``. ``ModelCheckpoint`` with
+        ``monitor='val/rmsd_mf1'`` runs on every rank and reads
+        ``trainer.callback_metrics``; if only rank 0 logs the metric, the
+        other ranks raise ``MisconfigurationException: could not find the
+        monitored key``.
+        """
         # Sanity-check guard — Lightning runs a 2-batch sanity check before
         # training; we must not generate here as the model is untrained.
         if trainer.sanity_checking:
             return
 
-        # Multi-GPU guard: only rank 0 logs to wandb.
-        if trainer.global_rank != 0:
-            return
-
-        # Lazy init: populate val protein cache on first real call.
-        if self._val_proteins is None:
-            try:
-                self._init_val_proteins(trainer)
-            except Exception:
-                logger.exception(
-                    "ProteinValEvalCallback: failed during lazy init; skipping"
-                )
-                return
-
+        rmsd_mf1_value = None
         step = trainer.global_step
-        logger.info(
-            f"ProteinValEvalCallback: generating val proteins at step {step}"
-        )
 
-        try:
-            was_training = pl_module.training
-            pl_module.eval()
-            ema_ctx = _get_ema_context(trainer)
+        if trainer.global_rank == 0:
+            # Lazy init: populate val protein cache on first real call.
+            if self._val_proteins is None:
+                try:
+                    self._init_val_proteins(trainer)
+                except Exception:
+                    logger.exception(
+                        "ProteinValEvalCallback: failed during lazy init; skipping"
+                    )
 
-            per_protein_results = []
-            try:
-                with ema_ctx, torch.no_grad():
-                    nsteps_base = getattr(pl_module, "meanflow_nsteps_sample", 1)
-                    for protein in self._val_proteins:
-                        per_protein_results.append(
-                            score_protein(
-                                pl_module,
-                                protein,
-                                nsamples=self._nsamples,
-                                nsteps_base=nsteps_base,
-                                tmp_dir=self._tmp_dir,
-                                step=step,
-                            )
-                        )
-            finally:
-                pl_module.train(was_training)
-
-            # --- Log to wandb in a single batched call ---
-            current_lr = current_optimizer_lr(trainer)
-            log_dict = aggregate_log_dict(
-                "val", self._val_proteins, per_protein_results, step
-            )
-            log_dict["samples/protein_table"] = build_samples_table(
-                self._val_proteins, per_protein_results, step, current_lr
-            )
-            log_dict["trainer/global_step"] = step
-
-            if pl_module.logger is not None:
-                pl_module.logger.experiment.log(log_dict, commit=False)
-
-            # Also surface val/rmsd_mf1 to Lightning's callback_metrics so
-            # ModelCheckpoint(monitor="val/rmsd_mf1") can track it. The wandb
-            # experiment.log path above stays in place so the global_step
-            # x-axis fix keeps working; we pass logger=False here to avoid
-            # double-logging to wandb on the wrong step.
-            rmsd_mf1 = log_dict.get("val/rmsd_mf1")
-            if rmsd_mf1 is not None:
-                pl_module.log(
-                    "val/rmsd_mf1",
-                    float(rmsd_mf1),
-                    on_step=False,
-                    on_epoch=True,
-                    rank_zero_only=True,
-                    sync_dist=False,
-                    prog_bar=False,
-                    logger=False,
+            if self._val_proteins is not None:
+                logger.info(
+                    f"ProteinValEvalCallback: generating val proteins at step {step}"
                 )
+                try:
+                    was_training = pl_module.training
+                    pl_module.eval()
+                    ema_ctx = _get_ema_context(trainer)
 
-            logger.info(
-                f"ProteinValEvalCallback: logged metrics for "
-                f"{len(per_protein_results)} proteins at step {step} | "
-                f"rmsd_mf1={log_dict['val/rmsd_mf1']:.2f} "
-                f"rmsd_mf10x={log_dict['val/rmsd_mf10x']:.2f}"
-            )
+                    per_protein_results = []
+                    try:
+                        with ema_ctx, torch.no_grad():
+                            nsteps_base = getattr(
+                                pl_module, "meanflow_nsteps_sample", 1
+                            )
+                            for protein in self._val_proteins:
+                                per_protein_results.append(
+                                    score_protein(
+                                        pl_module,
+                                        protein,
+                                        nsamples=self._nsamples,
+                                        nsteps_base=nsteps_base,
+                                        tmp_dir=self._tmp_dir,
+                                        step=step,
+                                    )
+                                )
+                    finally:
+                        pl_module.train(was_training)
 
-        except Exception:
-            logger.exception(
-                f"ProteinValEvalCallback: failed at step {step}; skipping"
+                    # --- Log to wandb in a single batched call ---
+                    current_lr = current_optimizer_lr(trainer)
+                    log_dict = aggregate_log_dict(
+                        "val", self._val_proteins, per_protein_results, step
+                    )
+                    log_dict["samples/protein_table"] = build_samples_table(
+                        self._val_proteins, per_protein_results, step, current_lr
+                    )
+                    log_dict["trainer/global_step"] = step
+
+                    if pl_module.logger is not None:
+                        pl_module.logger.experiment.log(log_dict, commit=False)
+
+                    raw = log_dict.get("val/rmsd_mf1")
+                    if raw is not None:
+                        rmsd_mf1_value = float(raw)
+
+                    logger.info(
+                        f"ProteinValEvalCallback: logged metrics for "
+                        f"{len(per_protein_results)} proteins at step {step} | "
+                        f"rmsd_mf1={log_dict['val/rmsd_mf1']:.2f} "
+                        f"rmsd_mf10x={log_dict['val/rmsd_mf10x']:.2f}"
+                    )
+
+                except Exception:
+                    logger.exception(
+                        f"ProteinValEvalCallback: failed at step {step}; skipping"
+                    )
+
+        # Broadcast rmsd_mf1 from rank 0 so every rank can populate
+        # callback_metrics via pl_module.log. ModelCheckpoint.on_validation_end
+        # runs on all ranks and needs the monitor key everywhere.
+        if trainer.world_size > 1:
+            rmsd_mf1_value = trainer.strategy.broadcast(rmsd_mf1_value, src=0)
+
+        if rmsd_mf1_value is not None:
+            pl_module.log(
+                "val/rmsd_mf1",
+                float(rmsd_mf1_value),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=False,
+                prog_bar=False,
+                logger=False,
             )
-            return

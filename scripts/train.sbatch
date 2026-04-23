@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=mf_ot
+#SBATCH --job-name=mf_base
 #SBATCH --partition=gpu
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:rtx6000:2
 #SBATCH --ntasks-per-node=2
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=logs/train_base_%j.out
 #SBATCH --error=logs/train_base_%j.err
@@ -23,15 +23,17 @@ echo "==========================================="
 # CODE_ROOT is this worktree — configs and code come from here so schema
 # changes in the worktree take effect.
 REPO_ROOT="/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina"
-CODE_ROOT="$REPO_ROOT/.claude/worktrees/train-1k-base"
+CODE_ROOT="$REPO_ROOT"
 DATA_ROOT="/netscratch/schekmenev"
 
 # --- Data staging config ---
-DATA_SRC=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina_ds
-DATA_SRC_MD5=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina_ds.md5
-DATA_STAGE_DIR=/netscratch/schekmenev/ot_mf_proteina_ds
-DATA_STAGE_MD5=/netscratch/schekmenev/ot_mf_proteina_ds.md5
-FID=df_pdb_f0.008_minl50_maxl256_mtprotein_etdiffractionEM_minoNone_maxoNone_minr0.0_maxr5.0_hl_rl_rnsrTrue_rpuTrue_l_rcuFalse
+# Dataset dir name doubles as the scratch stage name + manifest basename.
+DATA_NAME=monomers_minl50_maxl256_ds_frac_0.5
+DATA_SRC=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/${DATA_NAME}/
+DATA_SRC_MD5=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/${DATA_NAME}.md5
+DATA_STAGE_DIR=/netscratch/schekmenev/${DATA_NAME}
+DATA_STAGE_MD5=/netscratch/schekmenev/${DATA_NAME}.md5
+FID=df_pdb_f0.5_minl50_maxl256_mtprotein_etdiffractionEM_mino1_maxo1_minr0.0_maxr5.0_hl_rl_rnsrTrue_rpuTrue_l_rcuFalse
 SEQID=0.5
 
 compute_manifest() {
@@ -84,10 +86,23 @@ fi
 STAGE_HASH_FILE=$(cat "$DATA_STAGE_MD5" 2>/dev/null || echo "")
 if [ ! -d "$DATA_STAGE_DIR" ] || [ "$STAGE_HASH_FILE" != "$SRC_HASH" ]; then
     echo "$(hostname): dataset stage outdated or missing (src=$SRC_HASH, stage=$STAGE_HASH_FILE) — syncing..."
-    mkdir -p "$DATA_STAGE_DIR"
-    if ! rsync -a --delete "$DATA_SRC"/ "$DATA_STAGE_DIR"/; then
-        echo "ERROR: rsync failed" >&2
-        exit 1
+    # rsync isn't installed on every compute node (e.g. gpu01, gpu02). Use it
+    # when present for delta updates; otherwise wipe + cp -a to get the same
+    # "stage exactly matches source" semantics as `rsync -a --delete`.
+    if command -v rsync >/dev/null 2>&1; then
+        mkdir -p "$DATA_STAGE_DIR"
+        if ! rsync -a --delete "$DATA_SRC"/ "$DATA_STAGE_DIR"/; then
+            echo "ERROR: rsync failed" >&2
+            exit 1
+        fi
+    else
+        echo "$(hostname): rsync not available — falling back to cp -a"
+        rm -rf "$DATA_STAGE_DIR"
+        mkdir -p "$DATA_STAGE_DIR"
+        if ! cp -a "$DATA_SRC"/. "$DATA_STAGE_DIR"/; then
+            echo "ERROR: cp -a failed" >&2
+            exit 1
+        fi
     fi
     echo "$SRC_HASH" > "$DATA_STAGE_MD5"
     echo "$(hostname): staged $(find "$DATA_STAGE_DIR" -type f | wc -l) files to $DATA_STAGE_DIR"
@@ -118,7 +133,7 @@ export DATA_PATH="$DATA_STAGE_DIR"
 mkdir -p "$REPO_ROOT/logs"
 
 # Dataset fraction — needed by preflight check below and by the training run
-DATAMODULE_FRACTION=0.008
+DATAMODULE_FRACTION=0.5
 
 # --- Preflight: check that the dataset has been prepared ---
 EXPECTED_CSV_GLOB="$DATA_STAGE_DIR/df_pdb_f${DATAMODULE_FRACTION}_*.csv"
@@ -161,19 +176,28 @@ export NCCL_COMM_ID_TIMEOUT=60
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca.yaml)
-EXP_NAME="meanflow-ot-eucl"
+EXP_NAME="meanflow-base-0.5-monomers-maxl256"
 ACCUMULATE_GRAD_BATCHES=3
-VAL_CHECK_INTERVAL=1000
-OT_COUPLING_ENABLED=True
+# VAL_CHECK_INTERVAL is in OPTIMIZER STEPS. Lightning's val_check_interval is
+# measured in dataloader batches, so we multiply by ACCUMULATE_GRAD_BATCHES
+# when passing it as the opt.val_check_interval override below.
+VAL_CHECK_INTERVAL=2000
+OT_COUPLING_ENABLED=False
 MEANFLOW_NORM_P=1
 OT_POOL_SIZE=128
 LOSS_ACCUMULATION_STEPS=1
-MAX_EPOCHS=15000
-WARMUP_STEPS=500
-LR_DECAY_TOTAL_STEPS=200000
+MAX_EPOCHS=3000
+WARMUP_STEPS=1000
+LR_DECAY_TOTAL_STEPS=350000
 INIT_LR=1e-6
 END_LR=1e-5
 LR=1e-4
+
+# Checkpointing
+# True: resume from store/<run>/checkpoints/last.ckpt if it exists.
+# False: ignore any existing ckpt and start fresh (old files on disk are NOT removed;
+# rm them manually before the run if you want a clean store/<run>/checkpoints/ dir).
+RESUME_FROM_LAST_CKPT=False
 
 # Eval
 EVAL_ENABLED=True
@@ -206,9 +230,15 @@ NNODES=1
 # --- Run training ---
 # cd into CODE_ROOT so Python's implicit sys.path[0] (cwd) matches the
 # worktree, ensuring configs/ and proteinfoundation/ are loaded from here.
-echo "Starting MeanFlow base training..."
+echo "Starting MeanFlow training..."
 cd "$CODE_ROOT"
-srun python "$CODE_ROOT/proteinfoundation/train.py" \
+# --kill-on-bad-exit=1: if any rank exits non-zero, kill the whole step.
+# Without this srun leaves surviving ranks hanging (typically stuck in an
+# NCCL collective) until the job wall-time, observed as a 9h hang in job
+# 40785 where rank 0 crashed on a ModelCheckpoint MisconfigurationException
+# and rank 1 kept the allocation alive.
+VAL_CHECK_INTERVAL_BATCHES=$(( VAL_CHECK_INTERVAL * ACCUMULATE_GRAD_BATCHES ))
+srun --kill-on-bad-exit=1 python "$CODE_ROOT/proteinfoundation/train.py" \
     --config_name training_ca \
     --show_prog_bar \
     --exp_overrides \
@@ -223,7 +253,8 @@ srun python "$CODE_ROOT/proteinfoundation/train.py" \
         opt.max_epochs=$MAX_EPOCHS \
         opt.warmup_steps=$WARMUP_STEPS \
         opt.lr_decay_total_steps=$LR_DECAY_TOTAL_STEPS \
-        opt.val_check_interval=$VAL_CHECK_INTERVAL \
+        opt.val_check_interval=$VAL_CHECK_INTERVAL_BATCHES \
+        log.resume_from_last_ckpt=$RESUME_FROM_LAST_CKPT \
         eval.val_enabled=$EVAL_ENABLED \
         eval.n_val_proteins=$EVAL_N_VAL_PROTEINS \
         eval.nsamples=$EVAL_NSAMPLES \

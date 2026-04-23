@@ -271,13 +271,20 @@ if __name__ == "__main__":
     )  # Checkpoints in ./store/run_id/checkpoints/<ckpt-file>
     log_info(f"Checkpoints directory: {checkpoint_path_store}")
 
-    # Check if last checkpoint exists (this is useful if interrupted, it starts from last checkpoint)
-    last_ckpt_name = fetch_last_ckpt(checkpoint_path_store)
-    last_ckpt_path = (
-        os.path.join(checkpoint_path_store, last_ckpt_name)
-        if last_ckpt_name is not None
-        else None
-    )
+    # Check if last checkpoint exists (this is useful if interrupted, it starts from last checkpoint).
+    # When cfg_exp.log.resume_from_last_ckpt is False, any existing last.ckpt is ignored and the run
+    # starts from scratch (old checkpoints are NOT deleted — remove them manually if you want a clean dir).
+    resume_from_last_ckpt = bool(cfg_exp.log.get("resume_from_last_ckpt", True))
+    if resume_from_last_ckpt:
+        last_ckpt_name = fetch_last_ckpt(checkpoint_path_store)
+        last_ckpt_path = (
+            os.path.join(checkpoint_path_store, last_ckpt_name)
+            if last_ckpt_name is not None
+            else None
+        )
+    else:
+        last_ckpt_path = None
+        log_info("resume_from_last_ckpt=False — ignoring any existing checkpoint; starting fresh.")
     log_info(f"Last checkpoint: {last_ckpt_path}")
 
     # Extract number of cpus from config file

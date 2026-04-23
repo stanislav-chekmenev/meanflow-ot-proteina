@@ -19,13 +19,13 @@ datamodule:
   dataselector:
     _target_: "proteinfoundation.datasets.pdb_data.PDBDataSelector"
     data_dir: ${oc.env:DATA_PATH}/ # Directory where the dataset is stored
-    fraction: 0.0005 # Fraction of dataset to use
+    fraction: 0.5 # Fraction of dataset to use
     molecule_type: "protein" # Type of molecule for which to select
     experiment_types: ["diffraction", "EM"] # other options are "NMR" and "other"
     min_length: 50 # Exclude peptides of length 50
     max_length: 256 # Exclude polypeptides greater than length 500
-    oligomeric_min: null 
-    oligomeric_max: null 
+    oligomeric_min: 1 
+    oligomeric_max: 1 
     best_resolution: 0.0  # Include only proteins with resolution >= 0.0
     worst_resolution: 5.0 # Include only proteins with resolution <= 5.0
     has_ligands: [] # Include only proteins containing the ligand `ZN`

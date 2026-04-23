@@ -154,7 +154,16 @@ class EMA(Callback):
                 return
             ema_path = ckpt_path.replace(ext, f"-EMA{ext}")
             if os.path.exists(ema_path):
-                ema_state_dict = torch.load(ema_path, map_location=torch.device("cpu"))
+                # weights_only=False to match Lightning's own checkpoint loader
+                # (lightning/fabric/utilities/cloud_io.py:36): the EMA sibling
+                # checkpoint is written by this same codebase and contains
+                # non-tensor objects (e.g. omegaconf.DictConfig from hparams)
+                # that torch 2.6+'s weights_only=True default refuses to
+                # unpickle. The companion ckpt loaded by Lightning opens with
+                # weights_only=False for the same reason.
+                ema_state_dict = torch.load(
+                    ema_path, map_location=torch.device("cpu"), weights_only=False
+                )
 
                 checkpoint["optimizer_states"] = ema_state_dict["optimizer_states"]
                 del ema_state_dict

@@ -101,6 +101,7 @@ def test_val_eval_callback_logs_rmsd_mf1_to_callback_metrics(monkeypatch, tmp_pa
     trainer.sanity_checking = False
     trainer.global_rank = 0
     trainer.global_step = 42
+    trainer.world_size = 1
     val_ds = [_make_stub_graph("P1")]
     trainer.datamodule.val_ds = val_ds
 
@@ -125,6 +126,118 @@ def test_val_eval_callback_logs_rmsd_mf1_to_callback_metrics(monkeypatch, tmp_pa
     assert call.kwargs.get("on_step") is False
     assert call.kwargs.get("on_epoch") is True
     assert call.kwargs.get("logger") is False
+
+
+def test_val_eval_callback_logs_on_non_zero_rank_after_broadcast(monkeypatch, tmp_path):
+    """Under DDP, non-zero ranks must still call pl_module.log("val/rmsd_mf1", ...)
+    so ModelCheckpoint(monitor="val/rmsd_mf1").on_validation_end -- which runs
+    on every rank and reads trainer.callback_metrics -- does not raise
+    MisconfigurationException on those ranks.
+
+    Rank 0 produces the value, broadcasts it via trainer.strategy.broadcast,
+    and all ranks log the same scalar.
+    """
+    from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
+
+    cb = ProteinValEvalCallback(run_name="unit-test-rank1", n_val_proteins=1, nsamples=1)
+
+    trainer = MagicMock()
+    trainer.sanity_checking = False
+    trainer.global_rank = 1
+    trainer.global_step = 42
+    trainer.world_size = 2
+    # Rank 1 does not touch datamodule.val_ds -- only rank 0 does generation.
+    # trainer.strategy.broadcast must return the rank-0 value to all ranks.
+    trainer.strategy.broadcast = MagicMock(return_value=1.23)
+
+    pl_module = MagicMock()
+    pl_module.training = False
+    pl_module.meanflow_nsteps_sample = 1
+    pl_module.logger = MagicMock()
+
+    cb.on_validation_epoch_end(trainer, pl_module)
+
+    # Broadcast must be called with the rank-1-side placeholder (None) and src=0.
+    assert trainer.strategy.broadcast.called, (
+        "Expected trainer.strategy.broadcast to be called on non-zero rank so the "
+        "rank-0 rmsd_mf1 value reaches this rank."
+    )
+    bcast_call = trainer.strategy.broadcast.call_args
+    assert bcast_call.kwargs.get("src", bcast_call.args[1] if len(bcast_call.args) > 1 else 0) == 0
+
+    # pl_module.log must have been called with the broadcast value on this rank.
+    log_calls = [c for c in pl_module.log.call_args_list]
+    rmsd_calls = [c for c in log_calls if c.args and c.args[0] == "val/rmsd_mf1"]
+    assert len(rmsd_calls) == 1, (
+        f"Expected exactly one pl_module.log call for val/rmsd_mf1 on rank 1 "
+        f"(via broadcast), got calls: {log_calls}"
+    )
+    assert rmsd_calls[0].args[1] == pytest.approx(1.23)
+
+    # Rank 1 must NOT have called datamodule.val_ds[...] (no generation).
+    assert not trainer.datamodule.val_ds.__getitem__.called
+
+    # Rank 1 must NOT have called wandb experiment.log (only rank 0 does).
+    assert not pl_module.logger.experiment.log.called
+
+
+def test_val_eval_callback_broadcasts_when_world_size_gt_1(monkeypatch, tmp_path):
+    """On rank 0 with world_size > 1, the rmsd value must be broadcast so that
+    the per-rank pl_module.log call sees the same value after the broadcast.
+    This is what lets ModelCheckpoint succeed on every rank.
+    """
+    from proteinfoundation.callbacks import protein_val_eval as pve_mod
+    from proteinfoundation.callbacks.protein_val_eval import ProteinValEvalCallback
+
+    def fake_extract_gt_ca(graph):
+        return (graph.coords[:, 1, :].cpu().numpy(), int(graph.coords.shape[0]))
+
+    def fake_write_gt_pdb(gt_ca, pid, tmp_dir):
+        return str(tmp_path / f"gt_{pid}.pdb")
+
+    def fake_score_protein(pl_module, protein, nsamples, nsteps_base, tmp_dir, step):
+        return {
+            "mf1_pdb": "x", "mf10x_pdb": "x",
+            "rmsd_mf1": 1.23, "rmsd_mf10x": 2.34,
+            "rmsd_refl_mf1": 1.10, "rmsd_refl_mf10x": 2.20,
+            "chir_mf1": 0.5, "chir_mf10x": 0.6,
+            "rmsd_mf1_best": 1.0, "rmsd_mf10x_best": 2.0,
+        }
+
+    def fake_aggregate_log_dict(prefix, proteins, results, step):
+        return {f"{prefix}/rmsd_mf1": 1.23, f"{prefix}/rmsd_mf10x": 2.34}
+
+    monkeypatch.setattr(pve_mod, "extract_gt_ca", fake_extract_gt_ca)
+    monkeypatch.setattr(pve_mod, "write_gt_pdb", fake_write_gt_pdb)
+    monkeypatch.setattr(pve_mod, "score_protein", fake_score_protein)
+    monkeypatch.setattr(pve_mod, "aggregate_log_dict", fake_aggregate_log_dict)
+    monkeypatch.setattr(pve_mod, "build_samples_table", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(pve_mod, "current_optimizer_lr", lambda t: 1e-4)
+
+    cb = ProteinValEvalCallback(run_name="unit-test-bcast", n_val_proteins=1, nsamples=1)
+
+    trainer = MagicMock()
+    trainer.sanity_checking = False
+    trainer.global_rank = 0
+    trainer.global_step = 42
+    trainer.world_size = 2
+    trainer.datamodule.val_ds = [_make_stub_graph("P1")]
+    # broadcast returns whatever was passed in (identity stub is fine).
+    trainer.strategy.broadcast = MagicMock(side_effect=lambda obj, src=0: obj)
+
+    pl_module = MagicMock()
+    pl_module.training = False
+    pl_module.meanflow_nsteps_sample = 1
+    pl_module.logger = MagicMock()
+
+    cb.on_validation_epoch_end(trainer, pl_module)
+
+    # On rank 0 with world_size > 1 the broadcast must fire with the rank-0 value.
+    assert trainer.strategy.broadcast.called
+    # Payload must be the float rmsd value, not a tensor or None.
+    bcast_payload = trainer.strategy.broadcast.call_args.args[0]
+    assert isinstance(bcast_payload, float)
+    assert bcast_payload == pytest.approx(1.23)
 
 
 # ---------------------------------------------------------------------------
