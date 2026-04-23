@@ -186,15 +186,16 @@ class FIDCallback(L.Callback):
 
         # 11. Log: route through pl_module.log so GlobalStepWandbLogger picks up
         # the correct trainer.global_step x-axis (per project_wandb_global_step_fix).
-        # rank_zero_only=True means WandB only receives the value from rank 0,
-        # but the call is made on ALL ranks so that Lightning's ResultCollection
-        # is populated everywhere (required by any ModelCheckpoint that monitors
-        # a val/* key — see project_ddp_callback_metric_rank_bug_2026_04_23).
+        # on_step=True is required because on_step=False + on_epoch=False is a no-op
+        # in Lightning's ResultCollection — the metric would never reach WandB.
+        # rank_zero_only=True means WandB only receives the value from rank 0.
+        # val/fid is NOT monitored by ModelCheckpoint, so non-zero ranks not
+        # recording it does not cause MisconfigurationException.
         pl_module.log(
             "val/fid",
             fid_value,
             rank_zero_only=True,
-            on_step=False,
+            on_step=True,
             on_epoch=False,
             logger=True,
             sync_dist=False,
