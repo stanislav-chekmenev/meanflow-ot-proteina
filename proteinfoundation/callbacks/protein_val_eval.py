@@ -9,213 +9,123 @@
 # its affiliates is strictly prohibited.
 
 import os
+import tempfile
+from contextlib import nullcontext
+from typing import List
 
+import lightning as L
 import torch
 import wandb
-from lightning.pytorch.callbacks import Callback
-from loguru import logger
 
-from proteinfoundation.callbacks.protein_eval import ProteinEvalCallback
-from proteinfoundation.callbacks._sampling_utils import (
-    aggregate_log_dict,
-    build_samples_table,
-    current_optimizer_lr,
-    extract_gt_ca,
-    score_protein,
-    write_gt_pdb,
-)
-
-# Project-level tmp directory (mirrors protein_eval.py convention).
-_PROJECT_TMP_DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "tmp")
+from proteinfoundation.callbacks._sampling_utils import current_optimizer_lr
+from proteinfoundation.utils.ema_utils.ema_callback import EMAOptimizer
+from proteinfoundation.utils.ff_utils.pdb_utils import write_prot_to_pdb
 
 
-def _get_ema_context(trainer):
-    """Return a context manager that swaps model weights to EMA.
+class SamplesLoggingCallback(L.Callback):
+    """Periodically generate free (unconditional) protein samples and log them to WandB.
 
-    Delegates to ProteinEvalCallback._get_ema_context which checks for
-    EMAOptimizer in trainer.optimizers and falls back to nullcontext.
-    """
-    return ProteinEvalCallback._get_ema_context(trainer)
-
-
-class ProteinValEvalCallback(Callback):
-    """Validation callback that generates MeanFlow samples for fixed val proteins.
-
-    Fires on on_validation_epoch_end. For each of the first n_val_proteins
-    proteins in the validation dataset, generates both a 1-step and a 10-step
-    MeanFlow sample, computes RMSD and chirality against ground truth, and logs
-    per-protein Molecule visualisations plus aggregate scalar metrics to wandb.
+    Fires at ``on_train_batch_end`` every ``every_n_steps`` optimizer steps on
+    rank 0 only. Generates ``n_samples`` structures distributed across
+    ``lengths`` (round-robin), writes each to a temp PDB, and logs a
+    ``wandb.Table`` with columns ``[global_step, lr, length, image]`` under
+    the key ``samples/free_gen_table``.
     """
 
-    def __init__(self, run_name: str, n_val_proteins: int = 16, nsamples: int = 1):
-        """Construct the callback.
-
-        Args:
-            run_name: used to name the per-run tmp directory so parallel runs
-                do not overwrite each other.
-            n_val_proteins: how many val proteins to track.
-            nsamples: number of generations per protein per mode; metrics are
-                averaged over draws to reduce single-draw variance. The PDB
-                written to the wandb table is the draw with lowest rmsd_mf1.
-        """
+    def __init__(
+        self,
+        every_n_steps: int,
+        n_samples: int,
+        lengths: List[int],
+        nsteps: int = 1,
+        run_name: str = "run",
+    ):
         super().__init__()
-        self._run_name = run_name
-        self._n_val_proteins = n_val_proteins
-        self._nsamples = max(1, int(nsamples))
+        self.every_n_steps = every_n_steps
+        self.n_samples = n_samples
+        self.lengths = list(lengths)
+        self.nsteps = nsteps
+        self.run_name = run_name
 
-        # Per-run tmp dir: tmp/<run_name>/val/
-        project_tmp = os.path.normpath(_PROJECT_TMP_DIR)
-        self._tmp_dir = os.path.join(project_tmp, run_name, "val")
+        self._last_eval_step = -1
+
+        # Tmp dir for PDB files
+        self._tmp_dir = os.path.join("tmp", "samples", run_name)
         os.makedirs(self._tmp_dir, exist_ok=True)
 
-        # Cache: populated on first real validation round.
-        self._val_proteins = None  # list of dicts once populated
+    def _get_ema_context(self, trainer):
+        """Return a context manager that swaps model weights to EMA.
 
-    # ------------------------------------------------------------------
-    def _init_val_proteins(self, trainer):
-        """Populate self._val_proteins from the val dataset and write GT PDBs.
-
-        Called once on the first real on_validation_epoch_end. GT molecules
-        themselves are not logged here — they are emitted as rows of the
-        per-round `samples/protein_table` wandb.Table in
-        `on_validation_epoch_end`.
+        Falls back to nullcontext if no EMAOptimizer is found.
         """
-        val_ds = trainer.datamodule.val_ds
-        n = min(self._n_val_proteins, len(val_ds))
-        proteins = []
+        for optimizer in trainer.optimizers:
+            if isinstance(optimizer, EMAOptimizer):
+                return optimizer.swap_ema_weights()
+        return nullcontext()
 
-        for i in range(n):
-            graph = val_ds[i]
-            pid = graph.id
-
-            gt_ca, n_res = extract_gt_ca(graph)
-            if n_res == 0:
-                logger.warning(f"Skipping val protein {pid}: no valid CA atoms")
-                continue
-
-            gt_path = write_gt_pdb(gt_ca, pid, self._tmp_dir)
-            proteins.append(
-                {
-                    "id": pid,
-                    "gt_ca": gt_ca,
-                    "n_res": n_res,
-                    "gt_pdb_path": gt_path,
-                }
-            )
-
-        if not proteins:
-            logger.warning(
-                "ProteinValEvalCallback: no valid val proteins found (all had n_res=0);"
-                " will retry on next val round"
-            )
-            return
-
-        self._val_proteins = proteins
-        logger.info(
-            f"ProteinValEvalCallback: initialised {len(proteins)} val proteins"
-        )
-
-    # ------------------------------------------------------------------
-    def on_validation_epoch_end(self, trainer, pl_module):
-        """Generate samples for cached val proteins and log metrics to wandb.
-
-        Rank 0 runs the expensive sample generation; the resulting
-        ``val/rmsd_mf1`` scalar is then broadcast to all DDP ranks so every
-        rank participates in ``pl_module.log(...)``. ``ModelCheckpoint`` with
-        ``monitor='val/rmsd_mf1'`` runs on every rank and reads
-        ``trainer.callback_metrics``; if only rank 0 logs the metric, the
-        other ranks raise ``MisconfigurationException: could not find the
-        monitored key``.
-        """
-        # Sanity-check guard — Lightning runs a 2-batch sanity check before
-        # training; we must not generate here as the model is untrained.
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        # Skip during Lightning's sanity check
         if trainer.sanity_checking:
             return
 
-        rmsd_mf1_value = None
+        # Only rank 0 generates and logs
+        if trainer.global_rank != 0:
+            return
+
         step = trainer.global_step
 
-        if trainer.global_rank == 0:
-            # Lazy init: populate val protein cache on first real call.
-            if self._val_proteins is None:
-                try:
-                    self._init_val_proteins(trainer)
-                except Exception:
-                    logger.exception(
-                        "ProteinValEvalCallback: failed during lazy init; skipping"
-                    )
+        # Gradient-accumulation guard: on_train_batch_end fires per micro-batch;
+        # global_step only increments on an actual optimizer step.
+        if step == self._last_eval_step:
+            return
 
-            if self._val_proteins is not None:
-                logger.info(
-                    f"ProteinValEvalCallback: generating val proteins at step {step}"
-                )
-                try:
-                    was_training = pl_module.training
-                    pl_module.eval()
-                    ema_ctx = _get_ema_context(trainer)
+        if step % self.every_n_steps != 0:
+            return
 
-                    per_protein_results = []
-                    try:
-                        with ema_ctx, torch.no_grad():
-                            nsteps_base = getattr(
-                                pl_module, "meanflow_nsteps_sample", 1
-                            )
-                            for protein in self._val_proteins:
-                                per_protein_results.append(
-                                    score_protein(
-                                        pl_module,
-                                        protein,
-                                        nsamples=self._nsamples,
-                                        nsteps_base=nsteps_base,
-                                        tmp_dir=self._tmp_dir,
-                                        step=step,
-                                    )
-                                )
-                    finally:
-                        pl_module.train(was_training)
+        self._last_eval_step = step
 
-                    # --- Log to wandb in a single batched call ---
-                    current_lr = current_optimizer_lr(trainer)
-                    log_dict = aggregate_log_dict(
-                        "val", self._val_proteins, per_protein_results, step
-                    )
-                    log_dict["samples/protein_table"] = build_samples_table(
-                        self._val_proteins, per_protein_results, step, current_lr
-                    )
-                    log_dict["trainer/global_step"] = step
+        lr = current_optimizer_lr(trainer)
 
-                    if pl_module.logger is not None:
-                        pl_module.logger.experiment.log(log_dict, commit=False)
+        # Distribute n_samples round-robin across lengths.
+        # e.g. lengths=[64,128,192,256], n_samples=8 -> [64,128,192,256,64,128,192,256]
+        sample_lengths: List[int] = []
+        for i in range(self.n_samples):
+            sample_lengths.append(self.lengths[i % len(self.lengths)])
 
-                    raw = log_dict.get("val/rmsd_mf1")
-                    if raw is not None:
-                        rmsd_mf1_value = float(raw)
+        # Generate in eval mode with EMA weights
+        was_training = pl_module.training
+        pl_module.eval()
 
-                    logger.info(
-                        f"ProteinValEvalCallback: logged metrics for "
-                        f"{len(per_protein_results)} proteins at step {step} | "
-                        f"rmsd_mf1={log_dict['val/rmsd_mf1']:.2f} "
-                        f"rmsd_mf10x={log_dict['val/rmsd_mf10x']:.2f}"
-                    )
+        pdb_pairs: List[tuple] = []  # (length, pdb_path)
+        try:
+            ema_ctx = self._get_ema_context(trainer)
+            with ema_ctx, torch.no_grad():
+                for n_res in sample_lengths:
+                    samples = pl_module.generate(nsamples=1, n=n_res, nsteps=self.nsteps)
+                    atom37 = pl_module.samples_to_atom37(samples).detach().cpu().numpy()
 
-                except Exception:
-                    logger.exception(
-                        f"ProteinValEvalCallback: failed at step {step}; skipping"
-                    )
+                    # Write to a uniquely named temp file to avoid race conditions
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".pdb", delete=False, dir=self._tmp_dir
+                    ) as f:
+                        pdb_path = f.name
 
-        # Broadcast rmsd_mf1 from rank 0 so every rank can populate
-        # callback_metrics via pl_module.log. ModelCheckpoint.on_validation_end
-        # runs on all ranks and needs the monitor key everywhere.
-        if trainer.world_size > 1:
-            rmsd_mf1_value = trainer.strategy.broadcast(rmsd_mf1_value, src=0)
+                    write_prot_to_pdb(atom37[0], pdb_path, overwrite=True, no_indexing=True)
+                    pdb_pairs.append((n_res, pdb_path))
+        finally:
+            pl_module.train(was_training)
 
-        if rmsd_mf1_value is not None:
-            pl_module.log(
-                "val/rmsd_mf1",
-                float(rmsd_mf1_value),
-                on_step=False,
-                on_epoch=True,
-                sync_dist=False,
-                prog_bar=False,
-                logger=False,
+        # Build and log wandb.Table
+        table = wandb.Table(columns=["global_step", "lr", "length", "image"])
+        for length, pdb_path in pdb_pairs:
+            table.add_data(
+                step,
+                lr if lr is not None else float("nan"),
+                length,
+                wandb.Molecule(pdb_path),
             )
+
+        pl_module.logger.experiment.log(
+            {"samples/free_gen_table": table, "trainer/global_step": step},
+            commit=False,
+        )

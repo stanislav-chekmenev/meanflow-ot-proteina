@@ -79,3 +79,10 @@ ema:
   validate_original_weights: False  # Whether to run validation on regular or EMA weights
   every_n_steps: 1  # Frequency of EMA updates
   cpu_offload: False  # Whether to offload EMA weights to cpu
+
+eval:
+  enabled: True
+  every_n_steps: 1000
+  n_samples: 8
+  lengths: [64, 128, 192, 256]
+  nsteps: 1

@@ -98,12 +98,7 @@ ema:
 
 eval:
   enabled: true
-  every_n_steps: 1
-  n_residues: 76
-  ground_truth_pdb: ${oc.env:DATA_PATH}/debug/raw/1ubq.cif
-  nsamples: 1                  # Number of generations per protein per mode; metrics averaged over draws.
-  val_enabled: false           # ProteinValEvalCallback; disabled for debug (empty val set).
-  n_val_proteins: 16
-  train_subset_enabled: false  # TrainSubsetRmsdCallback; disabled for debug.
-  n_train_proteins: 4
-  train_subset_seed: 42
+  every_n_steps: 50
+  n_samples: 4
+  lengths: [64, 128]
+  nsteps: 1
