@@ -129,3 +129,12 @@ class SamplesLoggingCallback(L.Callback):
             {"samples/free_gen_table": table, "trainer/global_step": step},
             commit=False,
         )
+
+        # Remove temp PDB files after wandb has ingested them (wandb reads file
+        # content and computes sha256 at Molecule() construction time, so it's safe
+        # to delete only after log() returns — the data has been queued for upload).
+        for _, pdb_path in pdb_pairs:
+            try:
+                os.remove(pdb_path)
+            except OSError:
+                pass
