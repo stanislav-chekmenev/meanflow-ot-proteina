@@ -48,6 +48,7 @@ from proteinfoundation.utils.training_analysis_utils import (
     StartupInfoCallback,
 )
 from proteinfoundation.callbacks.protein_val_eval import SamplesLoggingCallback
+from proteinfoundation.callbacks.fid_callback import FIDCallback
 
 
 class GlobalStepWandbLogger(WandbLogger):
@@ -365,6 +366,18 @@ if __name__ == "__main__":
                 run_name=run_name,
             )
         )
+
+    fid_cfg = cfg_exp.get("fid", None)
+    if fid_cfg is not None and fid_cfg.get("enabled", False) and wandb_logger is not None:
+        callbacks.append(FIDCallback(
+            eval_every_n_steps=int(fid_cfg.eval_every_n_steps),
+            n_samples=int(fid_cfg.n_samples),
+            lengths=list(fid_cfg.lengths),
+            gearnet_ckpt_path=fid_cfg.gearnet_ckpt_path,
+            real_features_path=fid_cfg.real_features_path,
+            nsteps=int(fid_cfg.get("nsteps", 1)),
+            generation_batch_size=int(fid_cfg.get("generation_batch_size", 32)),
+        ))
 
     log_info(f"Using EMA with decay {cfg_exp.ema.decay}")
     callbacks.append(EMA(**cfg_exp.ema))

@@ -102,3 +102,13 @@ eval:
   n_samples: 4
   lengths: [64, 128]
   nsteps: 1
+
+fid:
+  enabled: False
+  eval_every_n_steps: 10000
+  n_samples: 16
+  lengths: [64, 128]
+  nsteps: 1
+  generation_batch_size: 8
+  gearnet_ckpt_path: ./data/metric_factory/model_weights/gearnet_ca.pth
+  real_features_path: ./data/metric_factory/features/pdb_eval_ca_features.pth
