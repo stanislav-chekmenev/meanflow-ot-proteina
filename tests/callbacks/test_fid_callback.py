@@ -134,7 +134,7 @@ class TestFIDCallback:
         mf.compute.assert_not_called()
 
     def test_cadence_fires_at_multiple(self, patch_metric_factory):
-        """eval_every_n_steps=1000, global_step=1000 -> compute() called once and val/fid logged."""
+        """eval_every_n_steps=1000, global_step=1000 -> compute() called once and val/fid emitted via experiment.log."""
         mock_cls, mf = patch_metric_factory
         cb = _make_callback(eval_every_n_steps=1000, n_samples=4, lengths=[64, 128])
         trainer = _make_trainer(global_step=1000, world_size=1)
@@ -143,9 +143,17 @@ class TestFIDCallback:
         cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
 
         mf.compute.assert_called_once()
-        # Check pl_module.log was called with "val/fid"
-        log_calls = [call for call in pl_module.log.call_args_list if call[0][0] == "val/fid"]
-        assert len(log_calls) == 1, f"Expected 1 val/fid log call; got {len(log_calls)}"
+        # val/fid must NOT go through pl_module.log (that would cache it in
+        # Lightning's ResultCollection and re-emit on every subsequent train batch).
+        pl_module.log.assert_not_called()
+        # Exactly one experiment.log call carrying val/fid.
+        exp_calls = [
+            call for call in pl_module.logger.experiment.log.call_args_list
+            if "val/fid" in call[0][0]
+        ]
+        assert len(exp_calls) == 1, f"Expected 1 experiment.log call with val/fid; got {len(exp_calls)}"
+        payload = exp_calls[0][0][0]
+        assert payload["trainer/global_step"] == 1000
 
     def test_cadence_not_fire_between(self, patch_metric_factory):
         """global_step=999 with eval_every_n_steps=1000 -> compute() must not be called."""
@@ -201,9 +209,10 @@ class TestFIDCallback:
         )
 
     def test_compute_called_on_all_ranks(self, patch_metric_factory):
-        """With world_size=2, compute() is still called (not guarded by rank 0)."""
+        """With world_size=2 on rank 1, compute() still fires (NCCL sync) but experiment.log does not."""
         mock_cls, mf = patch_metric_factory
-        # Test on rank 1 (non-zero rank) — compute must still be called
+        # Test on rank 1 (non-zero rank) — compute must still be called so the
+        # torchmetrics dist_reduce_fx="sum" all-reduce completes on both ranks.
         cb = _make_callback(eval_every_n_steps=1000, n_samples=4, lengths=[64, 128])
         trainer = _make_trainer(global_step=1000, world_size=2, global_rank=1)
         pl_module = _make_pl_module()
@@ -212,16 +221,13 @@ class TestFIDCallback:
 
         mf.compute.assert_called_once(), "compute() must be called on non-zero ranks too"
 
-        # pl_module.log with rank_zero_only=True
-        log_calls = [call for call in pl_module.log.call_args_list if call[0][0] == "val/fid"]
-        assert len(log_calls) == 1, "pl_module.log('val/fid', ...) must be called on all ranks"
-        call_kwargs = log_calls[0][1]
-        assert call_kwargs.get("rank_zero_only") is True, (
-            "val/fid must be logged with rank_zero_only=True"
-        )
+        # WandB emission is rank-0-only: non-zero rank must NOT call experiment.log.
+        pl_module.logger.experiment.log.assert_not_called()
+        # pl_module.log is never used by the FID callback regardless of rank.
+        pl_module.log.assert_not_called()
 
-    def test_log_does_not_pass_step_kwarg(self, patch_metric_factory):
-        """pl_module.log call for val/fid must not include step=; experiment.log must not include step=."""
+    def test_experiment_log_does_not_pass_step_kwarg(self, patch_metric_factory):
+        """experiment.log for val/fid must not pass step=; it must carry trainer/global_step inside the payload."""
         mock_cls, mf = patch_metric_factory
         cb = _make_callback(eval_every_n_steps=1000, n_samples=4, lengths=[64, 128])
         trainer = _make_trainer(global_step=1000, world_size=1)
@@ -229,19 +235,12 @@ class TestFIDCallback:
 
         cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
 
-        # Check pl_module.log calls
-        log_calls = [call for call in pl_module.log.call_args_list if call[0][0] == "val/fid"]
-        assert len(log_calls) == 1
-        call_kwargs = log_calls[0][1]
-        assert "step" not in call_kwargs, (
-            f"pl_module.log must not be called with step=; got kwargs={call_kwargs!r}"
-        )
-
         # Check experiment.log calls do not include step=
-        for call in pl_module.logger.experiment.log.call_args_list:
-            _, kwargs = call[0], call[1] if len(call) > 1 else {}
-            assert "step" not in call[1], (
-                f"experiment.log must not be called with step=; got kwargs={call[1]!r}"
+        calls = pl_module.logger.experiment.log.call_args_list
+        assert len(calls) >= 1
+        for call in calls:
+            assert "step" not in call.kwargs, (
+                f"experiment.log must not be called with step=; got kwargs={call.kwargs!r}"
             )
 
     # ----- Gap-filling tests added after first-pass TDD -----
@@ -345,7 +344,7 @@ class TestFIDCallback:
         )
 
     def test_val_fid_log_value_matches_compute_return(self, patch_metric_factory):
-        """The scalar logged as 'val/fid' must equal compute()['FID'].item()."""
+        """The scalar emitted as 'val/fid' must equal compute()['FID'].item()."""
         mock_cls, mf = patch_metric_factory
         mf.compute.return_value = {"FID": torch.tensor(7.77)}
 
@@ -355,9 +354,13 @@ class TestFIDCallback:
 
         cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
 
-        log_calls = [call for call in pl_module.log.call_args_list if call[0][0] == "val/fid"]
-        assert len(log_calls) == 1
-        assert log_calls[0][0][1] == pytest.approx(7.77)
+        exp_calls = [
+            call for call in pl_module.logger.experiment.log.call_args_list
+            if "val/fid" in call[0][0]
+        ]
+        assert len(exp_calls) == 1
+        payload = exp_calls[0][0][0]
+        assert payload["val/fid"] == pytest.approx(7.77)
 
     def test_generation_chunking_respects_batch_size(self, patch_metric_factory):
         """If per_rank > generation_batch_size, generate() is called multiple times per length."""
@@ -418,6 +421,37 @@ class TestFIDCallback:
         pl_module1.generate = tracking_generate
         cb.on_train_batch_end(trainer1, pl_module1, outputs=None, batch=None, batch_idx=0)
         assert sum(calls) == 2, f"rank 1 should produce base(2) only; got {calls}"
+
+    def test_val_fid_emitted_exactly_once_per_firing(self, patch_metric_factory):
+        """Regression: val/fid must be emitted once per FID firing and NOT on subsequent non-firing train batches.
+
+        In run dzjxwk1t the callback logged val/fid via pl_module.log(on_step=True, on_epoch=False),
+        which stored the scalar in Lightning's _ResultCollection._forward_cache. Because that cache
+        is only cleared by evaluation_loop end, subsequent train batches re-emitted the same value
+        into WandB (137 duplicate rows observed). The fix emits directly via logger.experiment.log
+        on rank 0, so the scalar hits WandB exactly once per firing.
+        """
+        mock_cls, mf = patch_metric_factory
+        cb = _make_callback(eval_every_n_steps=1000, n_samples=2, lengths=[64])
+        pl_module = _make_pl_module()
+
+        # Step 999: below cadence -> no emission.
+        cb.on_train_batch_end(_make_trainer(global_step=999), pl_module, outputs=None, batch=None, batch_idx=0)
+        # Step 1000: FID fires once.
+        cb.on_train_batch_end(_make_trainer(global_step=1000), pl_module, outputs=None, batch=None, batch_idx=0)
+        # Steps 1001..1010: no FID firing, must NOT re-emit val/fid.
+        for step in range(1001, 1011):
+            cb.on_train_batch_end(_make_trainer(global_step=step), pl_module, outputs=None, batch=None, batch_idx=0)
+
+        fid_emissions = [
+            call for call in pl_module.logger.experiment.log.call_args_list
+            if "val/fid" in call[0][0]
+        ]
+        assert len(fid_emissions) == 1, (
+            f"val/fid should be emitted to WandB exactly once across 11 batches (one firing); "
+            f"got {len(fid_emissions)}. "
+            f"Regression: pl_module.log cache would re-emit on every non-firing step."
+        )
 
     def test_build_pyg_batch_per_sample_mask_independence(self):
         """mask.clone() in _build_pyg_batch ensures modifying one sample's mask doesn't affect others."""

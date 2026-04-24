@@ -189,44 +189,18 @@ class FIDCallback(L.Callback):
         # 10. Reset fake-side; real features are preserved (reset_real_features=False)
         self.metric_factory.reset()
 
-        # 11. Log: route through pl_module.log so GlobalStepWandbLogger picks up
-        # the correct trainer.global_step x-axis (per project_wandb_global_step_fix).
-        # on_step=True is required because on_step=False + on_epoch=False is a no-op
-        # in Lightning's ResultCollection — the metric would never reach WandB.
-        # rank_zero_only=True means WandB only receives the value from rank 0.
-        # val/fid is NOT monitored by ModelCheckpoint, so non-zero ranks not
-        # recording it does not cause MisconfigurationException.
-        pl_module.log(
-            "val/fid",
-            fid_value,
-            rank_zero_only=True,
-            on_step=True,
-            on_epoch=False,
-            logger=True,
-            sync_dist=False,
-        )
-
-        # 12. Log peak VRAM for this FID firing so the first run tells us
-        # whether generation_batch_size needs tuning before the next eval.
-        # reset_peak_memory_stats was called before generation, so this is
-        # the peak used by the FID path only.
-        if torch.cuda.is_available() and device.type == "cuda":
-            peak_bytes = torch.cuda.max_memory_allocated(device)
-            peak_gb = peak_bytes / (1024 ** 3)
-            pl_module.log(
-                "val/fid_peak_vram_gb",
-                peak_gb,
-                rank_zero_only=True,
-                on_step=True,
-                on_epoch=False,
-                logger=True,
-                sync_dist=False,
-            )
-
-        # 13. Also emit trainer/global_step to WandB so the x-axis is correct
-        # (mirrors SamplesLoggingCallback pattern; commit=False defers the flush).
+        # 11. Log directly via the WandB experiment on rank 0. Going through
+        # pl_module.log would store the value in Lightning's _ResultCollection
+        # forward-cache, which only clears at evaluation_loop end — and there is
+        # no train-loop reset hook, so Lightning would re-emit the same val/fid
+        # scalar on every subsequent train batch until the next val run
+        # (observed: 137 duplicate rows after the step-10000 firing in run
+        # dzjxwk1t). Emitting via experiment.log sidesteps the cache and fires
+        # exactly once per FID firing. val/fid is not monitored by
+        # ModelCheckpoint, so skipping callback_metrics is safe.
         if trainer.global_rank == 0:
-            pl_module.logger.experiment.log(
-                {"trainer/global_step": step},
-                commit=False,
-            )
+            payload = {"val/fid": fid_value, "trainer/global_step": step}
+            if torch.cuda.is_available() and device.type == "cuda":
+                peak_bytes = torch.cuda.max_memory_allocated(device)
+                payload["val/fid_peak_vram_gb"] = peak_bytes / (1024 ** 3)
+            pl_module.logger.experiment.log(payload, commit=False)
