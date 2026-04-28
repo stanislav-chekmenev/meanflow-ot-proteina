@@ -381,16 +381,22 @@ def test_training_step_pool_mode_with_loss_accum_pops_k_batches_per_step():
     model.to("cpu")
     model.train()
 
+    import unittest.mock as mock
+
     class _FakeDM:
         batch_size = B
         train_ds = _FakeDataset(n_proteins=16, n_residues=8, seed=42)
         def setup(self, stage): pass
 
-    class _FakeTrainer:
-        datamodule = _FakeDM()
-        world_size = 1
-
-    model._trainer = _FakeTrainer()
+    trainer_mock = mock.MagicMock()
+    trainer_mock.world_size = 1
+    trainer_mock.gradient_clip_val = None
+    trainer_mock.gradient_clip_algorithm = None
+    trainer_mock.datamodule = _FakeDM()
+    # manual_backward calls trainer.strategy.backward(loss, None) -- wire it
+    # so it actually calls loss.backward() on the underlying tensor.
+    trainer_mock.strategy.backward = lambda loss, *a, **kw: loss.backward()
+    model._trainer = trainer_mock
     model.on_train_start()
 
     opts = model.configure_optimizers()
