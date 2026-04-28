@@ -86,6 +86,7 @@ class Proteina(ModelTrainerBase):
             self.automatic_optimization = False
         self._accum_grad_batches = cfg_exp.opt.get("accumulate_grad_batches", 1)
         self._manual_step_count = 0
+        self._pool_prefetched = None
 
         if self.motif_conditioning:
             self.motif_conditioning_sequence_rep = cfg_exp.training.get("motif_conditioning_sequence_rep", False)

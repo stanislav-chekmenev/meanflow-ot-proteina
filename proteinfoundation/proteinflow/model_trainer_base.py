@@ -585,7 +585,7 @@ class ModelTrainerBase(L.LightningModule):
             if pool_mode:
                 # Each pass: fresh OT-paired (x_1, x_0, mask) from the pool
                 # AND fresh (t, r) matching the per-pass batch_shape.
-                if k == 0 and getattr(self, "_pool_prefetched", None) is not None:
+                if k == 0 and self._pool_prefetched is not None:
                     x_1_k, x_0_pool_k, mask_k, batch_shape_k = self._pool_prefetched
                     self._pool_prefetched = None
                 else:
