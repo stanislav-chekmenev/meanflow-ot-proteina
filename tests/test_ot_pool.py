@@ -336,10 +336,12 @@ def test_training_step_pool_mode_runs_and_loss_finite():
     assert not model._ot_pool.empty
 
 
-def test_on_train_start_rejects_pool_with_loss_accum_gt_1():
+def test_on_train_start_accepts_pool_with_loss_accum_gt_1():
+    """Pool + loss_accumulation_steps > 1 is now supported. on_train_start
+    must build the pool without raising."""
     from proteinfoundation.proteinflow.proteina import Proteina
 
-    cfg_exp = _build_proteina_cfg(ot_pool_size=4, loss_accumulation_steps=2)
+    cfg_exp = _build_proteina_cfg(ot_pool_size=8, loss_accumulation_steps=2)
     model = Proteina(cfg_exp=cfg_exp)
     model.to("cpu")
 
@@ -354,5 +356,9 @@ def test_on_train_start_rejects_pool_with_loss_accum_gt_1():
 
     model._trainer = _FakeTrainer()
 
-    with pytest.raises(AssertionError, match="loss_accumulation_steps"):
-        model.on_train_start()
+    # Should NOT raise.
+    model.on_train_start()
+
+    assert model._ot_pool is not None
+    assert model._ot_pool.pool_size == 8
+    assert model._ot_pool.batch_size == 2
