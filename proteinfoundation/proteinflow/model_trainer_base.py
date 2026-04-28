@@ -422,10 +422,22 @@ class ModelTrainerBase(L.LightningModule):
             and not val_step
         )
 
-        if pool_mode:
-            # OT pool: pool owns (x_1, x_0) pairing. x_0 flows through as
-            # x_0_override into _compute_single_noise_loss.
+        # --- 2. Determine K ---
+        # Validation always uses a single noise sample regardless of config.
+        # Computed early so the pre-loop pool draw knows whether to stash the
+        # prefetched batch for the K-loop's first iteration.
+        K = 1 if val_step else self.loss_accumulation_steps
+
+        if pool_mode and K == 1:
+            # K=1 pool path: pre-draw the single batch the K=1 branch will use.
             x_1, x_0_pool, mask, batch_shape, n, dtype = self._get_ot_batch()
+        elif pool_mode:
+            # K>1 pool path: pool draw happens inside the K-loop below. Pre-draw
+            # one batch here so that (batch_shape, mask, t, r) are populated for
+            # the shared-setup blocks below. Stash it on self._pool_prefetched so
+            # the K-loop's first iteration consumes it (no double-pop).
+            x_1, x_0_pool, mask, batch_shape, n, dtype = self._get_ot_batch()
+            self._pool_prefetched = (x_1, x_0_pool, mask, batch_shape)
         else:
             x_0_pool = None
             x_1, mask, batch_shape, n, dtype = self.extract_clean_sample(batch)
@@ -472,10 +484,6 @@ class ModelTrainerBase(L.LightningModule):
         else:
             if "cath_code" in batch:
                 batch.pop("cath_code")
-
-        # --- 2. Determine K ---
-        # Validation always uses a single noise sample regardless of config.
-        K = 1 if val_step else self.loss_accumulation_steps
 
         # --- 3. K=1 path (automatic optimization, identical to pre-refactor behavior) ---
         if K == 1:
@@ -564,9 +572,56 @@ class ModelTrainerBase(L.LightningModule):
         total_loss_fm = 0.0
         total_adp_wt = 0.0
 
-        for _ in range(K):
-            loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_adp_wt_mean_k = self._compute_single_noise_loss(
-                x_1, mask, t_ext, r_ext, t, batch, B, use_sc=use_sc,
+        # Track samples processed across the K passes for scaling stats. In
+        # pool mode each pass uses a fresh B-batch from the pool, so K passes
+        # account for K * B samples. In non-pool mode all K passes share the
+        # same x_1 — only B samples per training_step.
+        if pool_mode:
+            samples_this_step = 0
+        else:
+            samples_this_step = mask.shape[0]
+
+        for k in range(K):
+            if pool_mode:
+                # Each pass: fresh OT-paired (x_1, x_0, mask) from the pool
+                # AND fresh (t, r) matching the per-pass batch_shape.
+                if k == 0 and getattr(self, "_pool_prefetched", None) is not None:
+                    x_1_k, x_0_pool_k, mask_k, batch_shape_k = self._pool_prefetched
+                    self._pool_prefetched = None
+                else:
+                    (
+                        x_1_k,
+                        x_0_pool_k,
+                        mask_k,
+                        batch_shape_k,
+                        _n_k,
+                        _dtype_k,
+                    ) = self._get_ot_batch()
+                t_k, r_k = self.fm.sample_two_timesteps_uniform(
+                    batch_shape_k, self.device,
+                    ratio=self.meanflow_ratio,
+                )
+                t_ext_k = t_k[..., None, None]
+                r_ext_k = r_k[..., None, None]
+                B_k = t_k.shape[0]
+                samples_this_step += mask_k.shape[0]
+            else:
+                # Legacy semantics: shared (x_1, mask, t, r) across passes;
+                # only x_0 varies (sampled fresh inside _compute_single_noise_loss).
+                x_1_k = x_1
+                mask_k = mask
+                t_k = t
+                t_ext_k = t_ext
+                r_ext_k = r_ext
+                B_k = B
+                x_0_pool_k = None  # triggers fresh x_0 + B x B OT inside the helper
+
+            loss_k, raw_loss_mf_k, raw_loss_fm_k, raw_adp_wt_mean_k = (
+                self._compute_single_noise_loss(
+                    x_1_k, mask_k, t_ext_k, r_ext_k, t_k, batch, B_k,
+                    use_sc=use_sc,
+                    x_0_override=x_0_pool_k,
+                )
             )
             # Backward with 1/K scaling so accumulated gradient == mean gradient
             self.manual_backward(loss_k / K)
@@ -580,26 +635,32 @@ class ModelTrainerBase(L.LightningModule):
         mf_ratio = self.cfg_exp.training.meanflow.ratio
         avg_combined = (1 - mf_ratio) * avg_loss_fm + mf_ratio * avg_loss_mf
 
+        # Use the per-pass batch_size for logging. In pool mode B is constant
+        # (= datamodule.batch_size) across passes; in non-pool mode B is the
+        # pre-loop B. Either way, mask_k.shape[0] from the last iteration is
+        # a stable per-pass batch size for log batch_size accounting.
+        log_bs = mask_k.shape[0]
+
         # Log averaged metrics
         self.log(
             f"{log_prefix}/combined_adaptive_loss", avg_combined,
             on_step=True, on_epoch=True, prog_bar=False, logger=True,
-            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+            batch_size=log_bs, sync_dist=True, add_dataloader_idx=False,
         )
         self.log(
             f"{log_prefix}/raw_loss_mf", avg_loss_mf,
             on_step=True, on_epoch=True, prog_bar=True, logger=True,
-            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+            batch_size=log_bs, sync_dist=True, add_dataloader_idx=False,
         )
         self.log(
             f"{log_prefix}/raw_loss_fm", avg_loss_fm,
             on_step=True, on_epoch=True, prog_bar=True, logger=True,
-            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+            batch_size=log_bs, sync_dist=True, add_dataloader_idx=False,
         )
         self.log(
             f"{log_prefix}/raw_adp_wt_mean", avg_adp_wt,
             on_step=True, on_epoch=True, prog_bar=False, logger=True,
-            batch_size=mask.shape[0], sync_dist=True, add_dataloader_idx=False,
+            batch_size=log_bs, sync_dist=True, add_dataloader_idx=False,
         )
         self.log(
             f"{log_prefix}/loss_accumulation_steps", float(K),
@@ -607,8 +668,9 @@ class ModelTrainerBase(L.LightningModule):
             batch_size=1, sync_dist=False, add_dataloader_idx=False,
         )
 
-        b, _n = mask.shape
-        self.nsamples_processed = self.nsamples_processed + b * self.trainer.world_size
+        self.nsamples_processed = (
+            self.nsamples_processed + samples_this_step * self.trainer.world_size
+        )
         self.log(
             "scaling/nsamples_processed", self.nsamples_processed * 1.0,
             on_step=True, on_epoch=False, prog_bar=False, logger=True,
