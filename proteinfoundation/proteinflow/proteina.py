@@ -17,6 +17,7 @@ from typing import Dict
 import torch
 from jaxtyping import Bool, Float
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from loguru import logger
 from scipy.spatial.transform import Rotation
 from torch import Tensor
 
@@ -158,7 +159,6 @@ class Proteina(ModelTrainerBase):
             )
             K = self.loss_accumulation_steps
             if pool_size < K * bs:
-                from loguru import logger
                 logger.warning(
                     "ot_pool_size={} < loss_accumulation_steps * batch_size "
                     "({} * {} = {}); pool will refill on every training step.",
