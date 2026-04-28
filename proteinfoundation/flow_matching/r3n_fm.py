@@ -551,6 +551,39 @@ class R3NFlowMatcher:
         time = torch.clip(time, min=0.0, max=1.0)
         return time
 
+    def sample_two_timesteps_uniform(
+        self,
+        shape: Tuple,
+        device: torch.device,
+        ratio: float = 0.25,
+    ) -> Tuple[Tensor, Tensor]:
+        """Sample (t, r) pair for MeanFlow training using uniform timesteps.
+
+        PAPER CONVENTION: t is the noise-side time, r is the data-side time, t >= r.
+        With probability (1 - ratio), r = t (collapses to standard FM).
+
+        Args:
+            shape: batch shape tuple, e.g. (B,)
+            device: torch device
+            ratio: probability that r != t (MeanFlow mode)
+
+        Returns:
+            t: Tensor of shape ``shape``, values in [0, 1]
+            r: Tensor of shape ``shape``, values in [0, 1], r <= t
+        """
+        num_samples = shape[0] if isinstance(shape, tuple) else shape
+
+        t = torch.rand((num_samples,), device=device)
+        r = torch.rand((num_samples,), device=device)
+
+        prob = torch.rand(num_samples, device=device)
+        mask = prob < 1 - ratio
+        r = torch.where(mask, t, r)
+
+        r = torch.minimum(t, r)
+
+        return t, r
+
     def sample_two_timesteps(
         self,
         shape: Tuple,

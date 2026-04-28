@@ -39,7 +39,7 @@ TRAIN_PT_DIR="$DATA_STAGE_DIR/processed"
 # Persistent checkpoint stage on this node's /netscratch. Re-used across jobs
 # so we don't pay the 744MB-per-ckpt copy on every run; md5-gated like the
 # dataset stage so a re-trained `last.ckpt` triggers a re-copy automatically.
-CKPT_STAGE_DIR="/netscratch/ckpt/mf_proteina"
+CKPT_STAGE_DIR="/netscratch/schekmenev/ckpt/mf_proteina"
 
 compute_manifest() {
     find "$1" -type f ! -name '*.md5' -printf '%P\t%s\t%T@\n' | LC_ALL=C sort | md5sum | awk '{print $1}'

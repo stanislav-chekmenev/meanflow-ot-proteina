@@ -432,13 +432,9 @@ class ModelTrainerBase(L.LightningModule):
             x_1 = self.fm._mask_and_zero_com(x_1, mask)
 
         # Sample (t, r) -- shared across all K noise passes
-        t, r = self.fm.sample_two_timesteps(
+        t, r = self.fm.sample_two_timesteps_uniform(
             batch_shape, self.device,
             ratio=self.meanflow_ratio,
-            P_mean_t=self.meanflow_P_mean_t,
-            P_std_t=self.meanflow_P_std_t,
-            P_mean_r=self.meanflow_P_mean_r,
-            P_std_r=self.meanflow_P_std_r,
         )
         t_ext = t[..., None, None]   # [B, 1, 1]
         r_ext = r[..., None, None]   # [B, 1, 1]

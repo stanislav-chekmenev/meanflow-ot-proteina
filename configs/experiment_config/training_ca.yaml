@@ -80,6 +80,7 @@ log:
   wandb_run_name: null  # Display name override (null = use run_name_)
   log_wandb: True  # whether to log to wandb
   checkpoint: True  # whether to store checkpoints
+  ckpt_root_dir: null  # If set, run dir = <ckpt_root_dir>/<run_name>/ (else ./store/<run_name>/). Used to redirect ckpts to /netscratch on h100.
   resume_from_last_ckpt: True  # If True and last.ckpt exists, resume from it; if False, ignore any existing ckpt and start fresh (old ckpts are NOT deleted)
   checkpoint_every_n_steps: 10000  # Optimizer steps (trainer.global_step) — unlike val_check_interval, NOT affected by accumulate_grad_batches
   last_ckpt_every_n_steps: 5000  # Optimizer steps between "last" ckpt updates (for requeuing); same unit as checkpoint_every_n_steps
@@ -98,7 +99,7 @@ eval:
   every_n_steps: 1000
   n_samples: 8
   lengths: [64, 128, 192, 256]
-  nsteps: 1
+  nsteps: 10
 
 fid:
   # First FID eval fires at trainer.global_step=eval_every_n_steps. If you OOM
@@ -108,7 +109,7 @@ fid:
   eval_every_n_steps: 10000
   n_samples: 5000
   lengths: [64, 100, 128, 150, 192, 200, 250, 256]
-  nsteps: 1
-  generation_batch_size: 16
+  nsteps: 10
+  generation_batch_size: 32
   gearnet_ckpt_path: ./data/metric_factory/model_weights/gearnet_ca.pth
   real_features_path: ./data/metric_factory/features/pdb_eval_ca_features.pth

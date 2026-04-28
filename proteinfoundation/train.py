@@ -262,9 +262,11 @@ if __name__ == "__main__":
     # Set run name and root directory for the run, used to store things
     run_name = cfg_exp.run_name_
     log_info(f"Job name: {run_name}")
-    root_run = os.path.join(
-        ".", "store", run_name
-    )  # Everything stored in ./store/<run_id>
+    ckpt_root_dir = cfg_exp.log.get("ckpt_root_dir", None)
+    if ckpt_root_dir:
+        root_run = os.path.join(ckpt_root_dir, run_name)
+    else:
+        root_run = os.path.join(".", "store", run_name)
     log_info(f"Root run: {root_run}")
 
     # Set checkpoint directory
@@ -443,11 +445,22 @@ if __name__ == "__main__":
         strategy=cfg_exp.opt.dist_strategy,
         enable_progress_bar=show_prog_bar,
         plugins=plugins,
-        accumulate_grad_batches=cfg_exp.opt.accumulate_grad_batches,
+        # When K>1 the model sets automatic_optimization=False; Lightning then
+        # rejects accumulate_grad_batches!=1 and gradient_clip_val>0. The manual
+        # training step in model_trainer_base does both itself.
+        accumulate_grad_batches=(
+            cfg_exp.opt.accumulate_grad_batches
+            if cfg_exp.training.get("loss_accumulation_steps", 1) == 1
+            else 1
+        ),
         num_sanity_val_steps=1,
         precision=precision,
         gradient_clip_algorithm="norm",
-        gradient_clip_val=1.0,
+        gradient_clip_val=(
+            1.0
+            if cfg_exp.training.get("loss_accumulation_steps", 1) == 1
+            else None
+        ),
     )
     try:
         trainer.fit(

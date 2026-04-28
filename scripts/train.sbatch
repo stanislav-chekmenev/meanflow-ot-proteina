@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=mf_ot
-#SBATCH --partition=gpu
+#SBATCH --partition=h100
 #SBATCH --qos=normal
-#SBATCH --gres=gpu:rtx6000:2
+#SBATCH --gres=gpu:h100nvl:2
 #SBATCH --ntasks-per-node=2
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=2-00:00:00
+#SBATCH --time=4-00:00:00
 #SBATCH --output=logs/train_ot_%j.out
 #SBATCH --error=logs/train_ot_%j.err
 
@@ -165,6 +165,33 @@ else
     export NCCL_P2P_DISABLE=0
 fi
 
+# --- h100 partition: redirect ckpts to /netscratch + stage GearNet weights ---
+# h100 has its own /netscratch separate from the gpu partition's. Checkpoints
+# live there to avoid filling the project directory; GearNet weights (76 MB,
+# read every FID firing) are staged once for faster loading.
+CKPT_ROOT_DIR=""
+GEARNET_CKPT_PATH=""
+if [ "$SLURM_JOB_PARTITION" = "h100" ]; then
+    CKPT_ROOT_DIR="/netscratch/schekmenev/ckpt/mf_proteina"
+    mkdir -p "$CKPT_ROOT_DIR"
+
+    GEARNET_SRC="$CODE_ROOT/data/metric_factory/model_weights/gearnet_ca.pth"
+    GEARNET_STAGE="$CKPT_ROOT_DIR/gearnet_ca.pth"
+    if [ ! -f "$GEARNET_SRC" ]; then
+        echo "ERROR: GearNet weights missing at $GEARNET_SRC" >&2
+        exit 1
+    fi
+    SRC_SIZE=$(stat -c %s "$GEARNET_SRC")
+    STAGE_SIZE=$(stat -c %s "$GEARNET_STAGE" 2>/dev/null || echo "")
+    if [ "$SRC_SIZE" != "$STAGE_SIZE" ]; then
+        echo "$(hostname): staging GearNet weights -> $GEARNET_STAGE"
+        cp -f "$GEARNET_SRC" "$GEARNET_STAGE"
+    else
+        echo "$(hostname): GearNet weights already staged at $GEARNET_STAGE"
+    fi
+    GEARNET_CKPT_PATH="$GEARNET_STAGE"
+fi
+
 # Controls how long PyTorch waits for other processes to join the group
 # Useful if one node fails early and the other is just hanging.
 export TORCH_NCCL_BLOCKING_WAIT=1  # Forces synchronous error reporting
@@ -176,19 +203,19 @@ export NCCL_COMM_ID_TIMEOUT=60
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca.yaml)
-EXP_NAME="meanflow-ot-eucl-0.5-monomers-maxl256"
-ACCUMULATE_GRAD_BATCHES=3
+EXP_NAME="mf-ot-eucl-loss-accum4"
+ACCUMULATE_GRAD_BATCHES=4
 # VAL_CHECK_INTERVAL is in OPTIMIZER STEPS. Lightning's val_check_interval is
 # measured in dataloader batches, so we multiply by ACCUMULATE_GRAD_BATCHES
 # when passing it as the opt.val_check_interval override below.
-VAL_CHECK_INTERVAL=2000
+VAL_CHECK_INTERVAL=5000
 OT_COUPLING_ENABLED=True
 MEANFLOW_NORM_P=1
-OT_POOL_SIZE=128
-LOSS_ACCUMULATION_STEPS=1
-MAX_EPOCHS=3000
-WARMUP_STEPS=1000
-LR_DECAY_TOTAL_STEPS=350000
+OT_POOL_SIZE=256
+LOSS_ACCUMULATION_STEPS=4
+MAX_EPOCHS=2500
+WARMUP_STEPS=500
+LR_DECAY_TOTAL_STEPS=100000
 INIT_LR=1e-6
 END_LR=1e-5
 LR=1e-4
@@ -229,6 +256,16 @@ cd "$CODE_ROOT"
 # 40785 where rank 0 crashed on a ModelCheckpoint MisconfigurationException
 # and rank 1 kept the allocation alive.
 VAL_CHECK_INTERVAL_BATCHES=$(( VAL_CHECK_INTERVAL * ACCUMULATE_GRAD_BATCHES ))
+
+# Build h100-only Hydra overrides (empty array on other partitions).
+H100_OVERRIDES=()
+if [ -n "$CKPT_ROOT_DIR" ]; then
+    H100_OVERRIDES+=("log.ckpt_root_dir=$CKPT_ROOT_DIR")
+fi
+if [ -n "$GEARNET_CKPT_PATH" ]; then
+    H100_OVERRIDES+=("fid.gearnet_ckpt_path=$GEARNET_CKPT_PATH")
+fi
+
 srun --kill-on-bad-exit=1 python "$CODE_ROOT/proteinfoundation/train.py" \
     --config_name training_ca \
     --show_prog_bar \
@@ -255,6 +292,7 @@ srun --kill-on-bad-exit=1 python "$CODE_ROOT/proteinfoundation/train.py" \
         training.self_cond_prob=$SELF_COND_PROB \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
+        "${H100_OVERRIDES[@]}" \
     --data_overrides \
         datamodule.batch_size=$DATAMODULE_BATCH_SIZE \
         datamodule.dataselector.fraction=$DATAMODULE_FRACTION \
