@@ -127,6 +127,11 @@ echo "Cluster files present — skipping mmseqs."
 export PYTHONPATH="${PYTHONPATH:-}:$CODE_ROOT"
 export PYTHONUNBUFFERED=1
 
+# wandb's service subprocess polls for a port file with a 30s default timeout.
+# On slow shared FS (observed on H100Azure03, job 43290) the poll can exceed
+# 30s and crash wandb.init. Bump to 5 minutes.
+export WANDB__SERVICE_WAIT=300
+
 # DATA_PATH env var — configs resolve ${oc.env:DATA_PATH}/ directly
 export DATA_PATH="$DATA_STAGE_DIR"
 
