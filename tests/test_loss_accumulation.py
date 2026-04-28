@@ -326,3 +326,28 @@ def test_gradient_magnitude_consistent_across_k():
         f"K=4 gradient norm ({grad_norm_k4:.4f}) is less than 0.1x the K=1 norm "
         f"({grad_norm_k1:.4f}), which is unexpectedly small"
     )
+
+
+def test_k_greater_than_1_non_pool_extract_called_once():
+    """Without the pool, K>1 must call extract_clean_sample exactly once per
+    training_step (shared-x_1 semantics). Pool mode is a separate path."""
+    model = _build_model(K=2, ot_enabled=True)  # ot_pool_size NOT set
+    # Defensive: ensure pool mode is OFF (the test pins non-pool K>1 semantics).
+    model.cfg_exp.training.ot_coupling.ot_pool_size = None
+    batch = _build_batch(4, 16)
+
+    call_count = []
+    original = model.extract_clean_sample
+
+    def counting_extract(b):
+        call_count.append(1)
+        return original(b)
+
+    model.extract_clean_sample = counting_extract
+
+    model.training_step(batch, batch_idx=0)
+
+    assert len(call_count) == 1, (
+        f"Non-pool K=2: extract_clean_sample called {len(call_count)} times, "
+        "expected exactly 1 (shared-x_1 semantics)."
+    )
