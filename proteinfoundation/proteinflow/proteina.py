@@ -131,16 +131,22 @@ class Proteina(ModelTrainerBase):
         create_dir(self.val_path_tmp)
 
     def on_train_start(self):
-        """Build the OT pool when ``ot_coupling.ot_pool_size`` is set."""
+        """Build the OT pool when ``ot_coupling.ot_pool_size`` is set.
+
+        Pool mode supports ``loss_accumulation_steps > 1``: per training step
+        the K-loop pops K consecutive batches from the pool, so the pool
+        refills ``K`` times more often than in K=1 mode.
+        """
         from proteinfoundation.flow_matching.ot_pool import OTPool
 
         ot_cfg = self.cfg_exp.training.get("ot_coupling", {})
         pool_size = ot_cfg.get("ot_pool_size", None)
         if pool_size is not None and self.ot_sampler is not None:
-            assert self.loss_accumulation_steps == 1, (
-                "ot_pool_size is set but loss_accumulation_steps="
-                f"{self.loss_accumulation_steps}. Pool mode requires "
-                "loss_accumulation_steps=1."
+            assert not self.cfg_exp.training.get("fold_cond", False), (
+                "Pool mode is incompatible with fold_cond=True: pool x_1 is "
+                "drawn from random dataset indices in OTPool.refill and has "
+                "no associated cath_code. Disable fold_cond or unset "
+                "ot_pool_size."
             )
             dm = self.trainer.datamodule
             if dm.train_ds is None:
@@ -150,6 +156,14 @@ class Proteina(ModelTrainerBase):
             assert pool_size >= bs, (
                 f"ot_pool_size ({pool_size}) must be >= batch_size ({bs})"
             )
+            K = self.loss_accumulation_steps
+            if pool_size < K * bs:
+                from loguru import logger
+                logger.warning(
+                    "ot_pool_size={} < loss_accumulation_steps * batch_size "
+                    "({} * {} = {}); pool will refill on every training step.",
+                    pool_size, K, bs, K * bs,
+                )
             self._ot_pool = OTPool(
                 pool_size=pool_size,
                 batch_size=bs,
