@@ -416,17 +416,22 @@ def test_training_step_pool_mode_with_loss_accum_pops_k_batches_per_step():
         "mask_dict": {"coords": torch.ones(B, 8, 1, 1, dtype=torch.bool)},
     }
 
-    cursor_before = model._ot_pool._cursor
+    # Count how many times the pool serves a batch during one training_step.
+    # Robust against cursor wraparound on refill — the cursor goes negative
+    # in the diff when the pool refills mid-step, so we count calls instead.
+    next_batch_calls = []
+    original_next_batch = model._ot_pool.next_batch
+
+    def counting_next_batch(*a, **kw):
+        next_batch_calls.append(1)
+        return original_next_batch(*a, **kw)
+
+    model._ot_pool.next_batch = counting_next_batch
 
     result = model.training_step(dummy_batch, batch_idx=0)
 
-    cursor_after = model._ot_pool._cursor
-
-    # K calls to next_batch advance cursor by K * B.
-    expected_advance = K * B
-    actual_advance = cursor_after - cursor_before
-    assert actual_advance == expected_advance, (
-        f"Pool cursor advanced by {actual_advance}, expected K*B={expected_advance}"
+    assert len(next_batch_calls) == K, (
+        f"Pool next_batch called {len(next_batch_calls)} times, expected K={K}"
     )
     # Manual optimization in K>1 returns None.
     assert result is None
