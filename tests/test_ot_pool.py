@@ -362,3 +362,65 @@ def test_on_train_start_accepts_pool_with_loss_accum_gt_1():
     assert model._ot_pool is not None
     assert model._ot_pool.pool_size == 8
     assert model._ot_pool.batch_size == 2
+
+
+# --- Task 4: training_step pool + K>1 pops K batches per step ---------------
+
+
+def test_training_step_pool_mode_with_loss_accum_pops_k_batches_per_step():
+    """Pool + loss_accumulation_steps=K: one training_step call pops K
+    consecutive batches from the pool (cursor advances by K*B)."""
+    from proteinfoundation.proteinflow.proteina import Proteina
+
+    K = 2
+    B = 2
+    POOL = 8  # holds K * B * 2 = 8 samples -> 2 training steps per pool
+
+    cfg_exp = _build_proteina_cfg(ot_pool_size=POOL, loss_accumulation_steps=K)
+    model = Proteina(cfg_exp=cfg_exp)
+    model.to("cpu")
+    model.train()
+
+    class _FakeDM:
+        batch_size = B
+        train_ds = _FakeDataset(n_proteins=16, n_residues=8, seed=42)
+        def setup(self, stage): pass
+
+    class _FakeTrainer:
+        datamodule = _FakeDM()
+        world_size = 1
+
+    model._trainer = _FakeTrainer()
+    model.on_train_start()
+
+    opts = model.configure_optimizers()
+    if isinstance(opts, dict):
+        opt = opts["optimizer"]
+    else:
+        opt = opts
+    model._optimizers_list = [opt]
+    model.optimizers = lambda: opt
+    model.lr_schedulers = lambda: None
+    model._manual_step_count = 0
+    model._accum_grad_batches = 1
+
+    # Build a dummy dataloader batch (ignored on the pool path).
+    dummy_batch = {
+        "coords": torch.zeros(B, 8, 37, 3),
+        "mask_dict": {"coords": torch.ones(B, 8, 1, 1, dtype=torch.bool)},
+    }
+
+    cursor_before = model._ot_pool._cursor
+
+    result = model.training_step(dummy_batch, batch_idx=0)
+
+    cursor_after = model._ot_pool._cursor
+
+    # K calls to next_batch advance cursor by K * B.
+    expected_advance = K * B
+    actual_advance = cursor_after - cursor_before
+    assert actual_advance == expected_advance, (
+        f"Pool cursor advanced by {actual_advance}, expected K*B={expected_advance}"
+    )
+    # Manual optimization in K>1 returns None.
+    assert result is None
