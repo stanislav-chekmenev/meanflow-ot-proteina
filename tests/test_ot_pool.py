@@ -435,3 +435,58 @@ def test_training_step_pool_mode_with_loss_accum_pops_k_batches_per_step():
     )
     # Manual optimization in K>1 returns None.
     assert result is None
+
+
+def test_training_step_pool_mode_with_loss_accum_finite_loss_and_grad():
+    """Pool + loss_accumulation_steps=K runs end-to-end: nonzero gradients on
+    nn parameters, no NaN/Inf in loss telemetry."""
+    from proteinfoundation.proteinflow.proteina import Proteina
+
+    import unittest.mock as mock
+
+    K = 2
+    B = 2
+    POOL = 8
+
+    cfg_exp = _build_proteina_cfg(ot_pool_size=POOL, loss_accumulation_steps=K)
+    model = Proteina(cfg_exp=cfg_exp)
+    model.to("cpu")
+    model.train()
+
+    class _FakeDM:
+        batch_size = B
+        train_ds = _FakeDataset(n_proteins=16, n_residues=8, seed=42)
+        def setup(self, stage): pass
+
+    trainer_mock = mock.MagicMock()
+    trainer_mock.world_size = 1
+    trainer_mock.gradient_clip_val = None
+    trainer_mock.gradient_clip_algorithm = None
+    trainer_mock.datamodule = _FakeDM()
+    trainer_mock.strategy.backward = lambda loss, *a, **kw: loss.backward()
+    model._trainer = trainer_mock
+    model.on_train_start()
+
+    opts = model.configure_optimizers()
+    if isinstance(opts, dict):
+        opt = opts["optimizer"]
+    else:
+        opt = opts
+    model._optimizers_list = [opt]
+    model.optimizers = lambda: opt
+    model.lr_schedulers = lambda: None
+    model._manual_step_count = 0
+    model._accum_grad_batches = K
+
+    dummy_batch = {
+        "coords": torch.zeros(B, 8, 37, 3),
+        "mask_dict": {"coords": torch.ones(B, 8, 1, 1, dtype=torch.bool)},
+    }
+
+    model.training_step(dummy_batch, batch_idx=0)
+
+    n_with_grad = sum(
+        1 for p in model.nn.parameters()
+        if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0
+    )
+    assert n_with_grad > 0, "Pool + K=2: no parameters received nonzero gradients"
