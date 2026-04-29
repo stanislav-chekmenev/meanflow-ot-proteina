@@ -28,12 +28,19 @@ from omegaconf import OmegaConf
 # ---------------------------------------------------------------------------
 
 
-def _make_log_cfg(top_k: int, *, ckpt_every: int = 10000, last_every: int = 3000):
+def _make_log_cfg(
+    top_k: int,
+    *,
+    ckpt_every: int = 0,
+    last_every: int = 3000,
+    keep_last_periodic: int = 5,
+):
     return OmegaConf.create(
         {
             "checkpoint_every_n_steps": ckpt_every,
             "last_ckpt_every_n_steps": last_every,
             "top_k_by_val_loss": top_k,
+            "keep_last_periodic": keep_last_periodic,
         }
     )
 
