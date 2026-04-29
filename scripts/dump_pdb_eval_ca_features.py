@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import glob
 import os
-import random
 import time
 from typing import Iterator, Tuple
 
@@ -124,13 +123,9 @@ def main():
         default=None,
         help="If set, skip structures longer than this (e.g. 256 to match the training filter).",
     )
-    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "Need a GPU for GearNet inference."
-
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
     out_dir = os.path.dirname(args.output)
     if out_dir:
