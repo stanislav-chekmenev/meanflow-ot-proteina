@@ -253,3 +253,34 @@ def test_periodic_callback_disabled_when_checkpoint_every_n_steps_le_zero(
     assert periodic_filenames == [], (
         f"no callback should have a 'periodic_' filename; got {periodic_filenames}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 10: all three callbacks coexist with distinct filename prefixes
+# ---------------------------------------------------------------------------
+
+
+def test_three_callbacks_have_distinct_filename_prefixes(tmp_path):
+    """When all three callback knobs are on, no two callbacks share a filename pattern.
+
+    Filename templates must be distinguishable so saved files cannot collide:
+      - last.ckpt  (save_last=True; filename='ignore' is unused for last.ckpt)
+      - periodic_…
+      - chk_…
+    """
+    from proteinfoundation.train import _build_ckpt_callbacks
+
+    cfg = _make_log_cfg(top_k=3, ckpt_every=2000, keep_last_periodic=4)
+    cbs = _build_ckpt_callbacks(str(tmp_path), cfg)
+    assert len(cbs) == 3
+
+    last_cb = next(c for c in cbs if c.save_last is True)
+    periodic_cb = next(c for c in cbs if c.monitor == "step")
+    topk_cb = next(c for c in cbs if c.monitor == "val/raw_loss_mf_epoch")
+
+    assert {id(last_cb), id(periodic_cb), id(topk_cb)} == {id(c) for c in cbs}
+
+    assert periodic_cb.filename.startswith("periodic_")
+    assert topk_cb.filename.startswith("chk_")
+    assert not last_cb.filename.startswith("periodic_")
+    assert not last_cb.filename.startswith("chk_")
