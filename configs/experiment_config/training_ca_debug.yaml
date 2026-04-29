@@ -80,6 +80,9 @@ log:
   ckpt_root_dir: null  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
   resume_from_last_ckpt: True  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
   top_k_by_val_loss: 3  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
+  checkpoint_every_n_steps: 10000  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
+  keep_last_periodic: 5  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
+  last_ckpt_every_n_steps: 5000  # Unused (checkpoint: False above); kept for schema parity with training_ca.yaml
 
 seed: 42
 
