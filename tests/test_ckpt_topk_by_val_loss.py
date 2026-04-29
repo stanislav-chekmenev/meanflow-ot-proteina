@@ -193,3 +193,33 @@ def test_built_last_callback_has_no_monitor(tmp_path):
         f"'last' callback must have monitor=None; got {last_cb.monitor!r}"
     )
     assert last_cb.save_last is True
+
+
+# ---------------------------------------------------------------------------
+# Test 8: checkpoint_every_n_steps > 0 adds a third "periodic" callback
+# ---------------------------------------------------------------------------
+
+
+def test_periodic_callback_added_when_checkpoint_every_n_steps_positive(tmp_path):
+    """checkpoint_every_n_steps > 0 must produce a 3rd callback with the right knobs.
+
+    Filename starts with 'periodic_', monitor='step' (mode='max') so Lightning
+    keeps the M most-recent step-triggered ckpts when save_top_k=M.
+    """
+    from proteinfoundation.train import _build_ckpt_callbacks
+    from proteinfoundation.utils.ema_utils.ema_callback import EmaModelCheckpoint
+
+    cfg = _make_log_cfg(top_k=3, ckpt_every=2000, keep_last_periodic=4)
+    cbs = _build_ckpt_callbacks(str(tmp_path), cfg)
+
+    assert len(cbs) == 3, f"expected 3 callbacks; got {len(cbs)}"
+    assert all(isinstance(c, EmaModelCheckpoint) for c in cbs)
+
+    periodic_cb = next(
+        c for c in cbs if c.filename and c.filename.startswith("periodic_")
+    )
+    assert periodic_cb._every_n_train_steps == 2000
+    assert periodic_cb.save_top_k == 4
+    assert periodic_cb.monitor == "step"
+    assert periodic_cb.mode == "max"
+    assert periodic_cb.save_last is False
