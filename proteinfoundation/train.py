@@ -122,6 +122,12 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
     Always returns the "last" ckpt callback (overwrites itself every
     ``last_ckpt_every_n_steps`` steps, used for requeuing).
 
+    If ``cfg_log.checkpoint_every_n_steps`` > 0, additionally returns a
+    periodic callback that fires every N optimizer steps and retains the
+    ``keep_last_periodic`` most-recent firings (via ``monitor="step",
+    mode="max", save_top_k=keep_last_periodic``). Filename prefix is
+    ``periodic_`` so it cannot collide with ``last.ckpt`` or the top-k file.
+
     If ``cfg_log.top_k_by_val_loss`` > 0, additionally returns a top-k
     callback that monitors ``val/raw_loss_mf_epoch`` (lower-is-better) and
     keeps the best K checkpoints. ``val/raw_loss_mf_epoch`` is the core
@@ -136,10 +142,11 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
         checkpoint_path_store: directory where checkpoints are written.
         cfg_log: OmegaConf-like log block with keys
             ``last_ckpt_every_n_steps``, ``checkpoint_every_n_steps``,
-            ``top_k_by_val_loss`` (default 3).
+            ``keep_last_periodic`` (default 5), ``top_k_by_val_loss``
+            (default 3).
 
     Returns:
-        list of EmaModelCheckpoint callbacks (length 1 or 2).
+        list of EmaModelCheckpoint callbacks (length 1, 2, or 3).
     """
     args_ckpt_last = {
         "dirpath": checkpoint_path_store,
@@ -149,6 +156,22 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
         "save_last": True,
     }
     callbacks = [EmaModelCheckpoint(**args_ckpt_last)]
+
+    periodic_every = int(cfg_log.get("checkpoint_every_n_steps", 0))
+    if periodic_every > 0:
+        keep_last = int(cfg_log.get("keep_last_periodic", 5))
+        args_ckpt_periodic = {
+            "dirpath": checkpoint_path_store,
+            "save_last": False,
+            "save_weights_only": False,
+            "filename": "periodic_{epoch:08d}_{step:012d}",
+            "every_n_train_steps": periodic_every,
+            "save_top_k": keep_last,
+            "monitor": "step",
+            "mode": "max",
+            "save_on_train_epoch_end": False,
+        }
+        callbacks.append(EmaModelCheckpoint(**args_ckpt_periodic))
 
     top_k = int(cfg_log.get("top_k_by_val_loss", 3))
     if top_k > 0:
@@ -163,15 +186,16 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
             "save_on_train_epoch_end": False,
         }
         callbacks.append(EmaModelCheckpoint(**args_ckpt_topk))
-        log_info(
-            f"Checkpointing: keeping top-{top_k} by val/raw_loss_mf_epoch (mode=min) "
-            f"+ last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
+
+    parts = [f"last ckpt every {cfg_log.last_ckpt_every_n_steps} steps"]
+    if periodic_every > 0:
+        parts.append(
+            f"periodic ckpt every {periodic_every} steps "
+            f"(keep last {int(cfg_log.get('keep_last_periodic', 5))})"
         )
-    else:
-        log_info(
-            f"Checkpointing: top-k disabled (top_k_by_val_loss=0); "
-            f"keeping only last ckpt every {cfg_log.last_ckpt_every_n_steps} steps."
-        )
+    if top_k > 0:
+        parts.append(f"top-{top_k} by val/raw_loss_mf_epoch (mode=min)")
+    log_info("Checkpointing: " + " + ".join(parts) + ".")
 
     return callbacks
 
