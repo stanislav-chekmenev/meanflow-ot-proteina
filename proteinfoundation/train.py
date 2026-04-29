@@ -158,15 +158,15 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
     callbacks = [EmaModelCheckpoint(**args_ckpt_last)]
 
     periodic_every = int(cfg_log.get("checkpoint_every_n_steps", 0))
+    keep_last_periodic = int(cfg_log.get("keep_last_periodic", 5))
     if periodic_every > 0:
-        keep_last = int(cfg_log.get("keep_last_periodic", 5))
         args_ckpt_periodic = {
             "dirpath": checkpoint_path_store,
             "save_last": False,
             "save_weights_only": False,
             "filename": "periodic_{epoch:08d}_{step:012d}",
             "every_n_train_steps": periodic_every,
-            "save_top_k": keep_last,
+            "save_top_k": keep_last_periodic,
             "monitor": "step",
             "mode": "max",
             "save_on_train_epoch_end": False,
@@ -191,7 +191,7 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
     if periodic_every > 0:
         parts.append(
             f"periodic ckpt every {periodic_every} steps "
-            f"(keep last {int(cfg_log.get('keep_last_periodic', 5))})"
+            f"(keep last {keep_last_periodic})"
         )
     if top_k > 0:
         parts.append(f"top-{top_k} by val/raw_loss_mf_epoch (mode=min)")
