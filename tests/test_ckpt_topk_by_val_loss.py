@@ -223,3 +223,33 @@ def test_periodic_callback_added_when_checkpoint_every_n_steps_positive(tmp_path
     assert periodic_cb.monitor == "step"
     assert periodic_cb.mode == "max"
     assert periodic_cb.save_last is False
+
+
+# ---------------------------------------------------------------------------
+# Test 9: checkpoint_every_n_steps <= 0 disables the periodic callback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ckpt_every", [0, -1])
+def test_periodic_callback_disabled_when_checkpoint_every_n_steps_le_zero(
+    tmp_path, ckpt_every
+):
+    """checkpoint_every_n_steps <= 0 must NOT add a periodic-prefix callback.
+
+    Length matches the prior 'top-K only' world: 1 (last) + 1 (top-k) = 2.
+    """
+    from proteinfoundation.train import _build_ckpt_callbacks
+
+    cfg = _make_log_cfg(top_k=3, ckpt_every=ckpt_every)
+    cbs = _build_ckpt_callbacks(str(tmp_path), cfg)
+
+    assert len(cbs) == 2, (
+        f"expected 2 callbacks (last + top-k) when ckpt_every={ckpt_every}; "
+        f"got {len(cbs)}"
+    )
+    periodic_filenames = [
+        c.filename for c in cbs if c.filename and c.filename.startswith("periodic_")
+    ]
+    assert periodic_filenames == [], (
+        f"no callback should have a 'periodic_' filename; got {periodic_filenames}"
+    )
