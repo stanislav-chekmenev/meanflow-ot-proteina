@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mf_ot
+#SBATCH --job-name=mf_base
 #SBATCH --partition=h100
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:h100nvl:2
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=4-00:00:00
-#SBATCH --output=logs/train_ot_%j.out
-#SBATCH --error=logs/train_ot_%j.err
+#SBATCH --output=logs/train_base_%j.out
+#SBATCH --error=logs/train_base_%j.err
 
 echo "==========================================="
 echo "Job started: $(date)"
@@ -28,12 +28,12 @@ DATA_ROOT="/netscratch/schekmenev"
 
 # --- Data staging config ---
 # Dataset dir name doubles as the scratch stage name + manifest basename.
-DATA_NAME=monomers_minl50_maxl256_ds_frac_0.5
+DATA_NAME=monomers_minl50_maxl256_ds_frac_0.1
 DATA_SRC=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/${DATA_NAME}/
 DATA_SRC_MD5=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/${DATA_NAME}.md5
 DATA_STAGE_DIR=/netscratch/schekmenev/${DATA_NAME}
 DATA_STAGE_MD5=/netscratch/schekmenev/${DATA_NAME}.md5
-FID=df_pdb_f0.5_minl50_maxl256_mtprotein_etdiffractionEM_mino1_maxo1_minr0.0_maxr5.0_hl_rl_rnsrTrue_rpuTrue_l_rcuFalse
+FID=df_pdb_f0.1_minl50_maxl256_mtprotein_etdiffractionEM_mino1_maxo1_minr0.0_maxr5.0_hl_rl_rnsrTrue_rpuTrue_l_rcuFalse
 SEQID=0.5
 
 compute_manifest() {
@@ -138,7 +138,7 @@ export DATA_PATH="$DATA_STAGE_DIR"
 mkdir -p "$REPO_ROOT/logs"
 
 # Dataset fraction — needed by preflight check below and by the training run
-DATAMODULE_FRACTION=0.5
+DATAMODULE_FRACTION=0.1
 
 # --- Preflight: check that the dataset has been prepared ---
 EXPECTED_CSV_GLOB="$DATA_STAGE_DIR/df_pdb_f${DATAMODULE_FRACTION}_*.csv"
@@ -208,16 +208,16 @@ export NCCL_COMM_ID_TIMEOUT=60
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca.yaml)
-EXP_NAME="mf-ot-eucl-loss-accum4"
+EXP_NAME="mf-base-frac${DATAMODULE_FRACTION}"
 ACCUMULATE_GRAD_BATCHES=4
 # VAL_CHECK_INTERVAL is in OPTIMIZER STEPS. Lightning's val_check_interval is
 # measured in dataloader batches, so we multiply by ACCUMULATE_GRAD_BATCHES
 # when passing it as the opt.val_check_interval override below.
 VAL_CHECK_INTERVAL=5000
-OT_COUPLING_ENABLED=True
+OT_COUPLING_ENABLED=False
 MEANFLOW_NORM_P=1
-OT_POOL_SIZE=256
-LOSS_ACCUMULATION_STEPS=4
+OT_POOL_SIZE=128
+LOSS_ACCUMULATION_STEPS=1
 MAX_EPOCHS=2500
 WARMUP_STEPS=500
 LR_DECAY_TOTAL_STEPS=100000

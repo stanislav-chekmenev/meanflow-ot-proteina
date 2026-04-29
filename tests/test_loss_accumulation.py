@@ -328,6 +328,53 @@ def test_gradient_magnitude_consistent_across_k():
     )
 
 
+def test_k_greater_than_1_combined_adaptive_loss_logged_value():
+    """
+    K>1 must log the *adaptive* combined loss (bounded in [0,1) when
+    norm_p=1, norm_eps=1e-3), NOT a combination of the raw pre-adaptive
+    losses. With raw MSE values that can easily reach 5-60, mistakenly
+    logging the raw combination would yield the unbounded values seen in
+    run 8bn66xg2.
+    """
+    torch.manual_seed(0)
+    model = _build_model(K=4, accum=4)
+    batch = _build_batch(4, 16)
+
+    logged = {}
+    original_log = model.log
+
+    def capture_log(name, value, *args, **kwargs):
+        # Resolve tensors to floats so we can compare numerically.
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        logged[name] = value
+        return None  # the real method returns None too
+
+    model.log = capture_log
+
+    model.training_step(batch, batch_idx=0)
+
+    assert "train/combined_adaptive_loss" in logged, (
+        "K>1 path did not log train/combined_adaptive_loss"
+    )
+    combined_adp = logged["train/combined_adaptive_loss"]
+    raw_mf = logged["train/raw_loss_mf"]
+    raw_fm = logged["train/raw_loss_fm"]
+
+    # With norm_p=1, norm_eps=1e-3, adaptive_loss = loss / (loss + 1e-3)
+    # is in [0, 1). The *combined* adaptive loss is a convex combination
+    # of two such terms, so it must also be < 1.
+    assert combined_adp < 1.0, (
+        f"combined_adaptive_loss={combined_adp:.4f} must be < 1.0 with "
+        f"norm_p=1, norm_eps=1e-3 (raw_mf={raw_mf:.4f}, raw_fm={raw_fm:.4f}). "
+        "It looks like the K>1 path is logging a combination of raw losses "
+        "instead of adaptive losses."
+    )
+
+
 def test_k_greater_than_1_non_pool_extract_called_once():
     """Without the pool, K>1 must call extract_clean_sample exactly once per
     training_step (shared-x_1 semantics). Pool mode is a separate path."""

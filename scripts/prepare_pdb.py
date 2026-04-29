@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fraction",
         type=float,
-        default=0.5,
+        default=0.25,
         help="Fraction of PDB to use",
     )
     return parser.parse_args()

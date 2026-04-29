@@ -571,6 +571,7 @@ class ModelTrainerBase(L.LightningModule):
         total_loss_mf = 0.0
         total_loss_fm = 0.0
         total_adp_wt = 0.0
+        total_combined_adp = 0.0
 
         # Track samples processed across the K passes for scaling stats. In
         # pool mode each pass uses a fresh B-batch from the pool, so K passes
@@ -628,12 +629,12 @@ class ModelTrainerBase(L.LightningModule):
             total_loss_mf += raw_loss_mf_k.item()
             total_loss_fm += raw_loss_fm_k.item()
             total_adp_wt += raw_adp_wt_mean_k.item()
+            total_combined_adp += loss_k.detach().item()
 
         avg_loss_mf = total_loss_mf / K
         avg_loss_fm = total_loss_fm / K
         avg_adp_wt = total_adp_wt / K
-        mf_ratio = self.cfg_exp.training.meanflow.ratio
-        avg_combined = (1 - mf_ratio) * avg_loss_fm + mf_ratio * avg_loss_mf
+        avg_combined = total_combined_adp / K
 
         # Use the per-pass batch_size for logging. In pool mode B is constant
         # (= datamodule.batch_size) across passes; in non-pool mode B is the
