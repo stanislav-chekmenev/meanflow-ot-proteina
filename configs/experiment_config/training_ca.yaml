@@ -52,7 +52,7 @@ training:
     normalize_cost: False
     ot_pool_size: 128   # Enable streaming OT pool by setting to a multiple of batch_size; null disables it.
   meanflow:
-    ratio: 0.25
+    ratio: 0.75
     P_mean_t: -0.4
     P_std_t: 1.0
     P_mean_r: -0.4
@@ -85,7 +85,7 @@ log:
   checkpoint_every_n_steps: 10000  # Optimizer steps between retained periodic ckpts (trainer.global_step). 0 disables the periodic callback. NOT affected by accumulate_grad_batches.
   last_ckpt_every_n_steps: 5000  # Optimizer steps between "last" ckpt updates (for requeuing); same unit as checkpoint_every_n_steps
   top_k_by_val_loss: 3  # Keep this many best-val-loss checkpoints (mode=min on val/raw_loss_mf_epoch). 0 = keep only the "last" ckpt.
-  keep_last_periodic: 5  # How many most-recent periodic ckpts to retain (paired with checkpoint_every_n_steps). Periodic ckpts use filename prefix 'periodic_'.
+  keep_last_periodic: 10  # How many most-recent periodic ckpts to retain (paired with checkpoint_every_n_steps). Periodic ckpts use filename prefix 'periodic_'.
 
 seed: 42
 
@@ -97,7 +97,7 @@ ema:
 
 eval:
   enabled: True
-  every_n_steps: 1000
+  every_n_steps: 10000
   n_samples: 8
   lengths: [64, 128, 192, 256]
   nsteps: 10
@@ -108,9 +108,9 @@ fid:
   # is logged every firing so subsequent runs can tune from data.
   enabled: True
   eval_every_n_steps: 10000
-  n_samples: 5000
+  n_samples: 2708
   lengths: [64, 100, 128, 150, 192, 200, 250, 256]
   nsteps: 10
   generation_batch_size: 32
   gearnet_ckpt_path: ./data/metric_factory/model_weights/gearnet_ca.pth
-  real_features_path: ./data/metric_factory/features/pdb_eval_ca_features.pth
+  real_features_path: ./data/metric_factory/features/pdb_eval_ca_features_monomers_frac0.1.pth

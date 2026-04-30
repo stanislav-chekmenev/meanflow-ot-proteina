@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mf_base
+#SBATCH --job-name=mf_ot
 #SBATCH --partition=h100
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:h100nvl:2
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=4-00:00:00
-#SBATCH --output=logs/train_base_%j.out
-#SBATCH --error=logs/train_base_%j.err
+#SBATCH --output=logs/train_ot_%j.out
+#SBATCH --error=logs/train_ot_%j.err
 
 echo "==========================================="
 echo "Job started: $(date)"
@@ -173,9 +173,12 @@ fi
 # --- h100 partition: redirect ckpts to /netscratch + stage GearNet weights ---
 # h100 has its own /netscratch separate from the gpu partition's. Checkpoints
 # live there to avoid filling the project directory; GearNet weights (76 MB,
-# read every FID firing) are staged once for faster loading.
+# read every FID firing) and the FID real-features .pth (~2 MB, read once at
+# FIDCallback init but lives next to the GearNet ckpt for symmetry) are staged
+# once for faster loading.
 CKPT_ROOT_DIR=""
 GEARNET_CKPT_PATH=""
+FID_REAL_FEATURES_PATH=""
 if [ "$SLURM_JOB_PARTITION" = "h100" ]; then
     CKPT_ROOT_DIR="/netscratch/schekmenev/ckpt/mf_proteina"
     mkdir -p "$CKPT_ROOT_DIR"
@@ -195,6 +198,23 @@ if [ "$SLURM_JOB_PARTITION" = "h100" ]; then
         echo "$(hostname): GearNet weights already staged at $GEARNET_STAGE"
     fi
     GEARNET_CKPT_PATH="$GEARNET_STAGE"
+
+    FID_FEATURES_SRC="$CODE_ROOT/data/metric_factory/features/pdb_eval_ca_features_monomers_frac0.1.pth"
+    FID_FEATURES_STAGE="$CKPT_ROOT_DIR/$(basename "$FID_FEATURES_SRC")"
+    if [ ! -f "$FID_FEATURES_SRC" ]; then
+        echo "ERROR: FID real-features missing at $FID_FEATURES_SRC" >&2
+        echo "  Build it via: sbatch scripts/dump_pdb_eval_ca_features.sbatch" >&2
+        exit 1
+    fi
+    SRC_SIZE=$(stat -c %s "$FID_FEATURES_SRC")
+    STAGE_SIZE=$(stat -c %s "$FID_FEATURES_STAGE" 2>/dev/null || echo "")
+    if [ "$SRC_SIZE" != "$STAGE_SIZE" ]; then
+        echo "$(hostname): staging FID real-features -> $FID_FEATURES_STAGE"
+        cp -f "$FID_FEATURES_SRC" "$FID_FEATURES_STAGE"
+    else
+        echo "$(hostname): FID real-features already staged at $FID_FEATURES_STAGE"
+    fi
+    FID_REAL_FEATURES_PATH="$FID_FEATURES_STAGE"
 fi
 
 # Controls how long PyTorch waits for other processes to join the group
@@ -208,15 +228,16 @@ export NCCL_COMM_ID_TIMEOUT=60
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca.yaml)
-EXP_NAME="mf-base-frac${DATAMODULE_FRACTION}"
+EXP_NAME="mf-ot-frac${DATAMODULE_FRACTION}"
 ACCUMULATE_GRAD_BATCHES=4
 # VAL_CHECK_INTERVAL is in OPTIMIZER STEPS. Lightning's val_check_interval is
 # measured in dataloader batches, so we multiply by ACCUMULATE_GRAD_BATCHES
 # when passing it as the opt.val_check_interval override below.
 VAL_CHECK_INTERVAL=5000
-OT_COUPLING_ENABLED=False
+OT_COUPLING_ENABLED=True
 MEANFLOW_NORM_P=1
-OT_POOL_SIZE=128
+RATIO=0.75 # meanflow loss ratio with respect to FM loss
+OT_POOL_SIZE=256
 LOSS_ACCUMULATION_STEPS=1
 MAX_EPOCHS=2500
 WARMUP_STEPS=500
@@ -270,6 +291,9 @@ fi
 if [ -n "$GEARNET_CKPT_PATH" ]; then
     H100_OVERRIDES+=("fid.gearnet_ckpt_path=$GEARNET_CKPT_PATH")
 fi
+if [ -n "$FID_REAL_FEATURES_PATH" ]; then
+    H100_OVERRIDES+=("fid.real_features_path=$FID_REAL_FEATURES_PATH")
+fi
 
 srun --kill-on-bad-exit=1 python "$CODE_ROOT/proteinfoundation/train.py" \
     --config_name training_ca \
@@ -292,6 +316,7 @@ srun --kill-on-bad-exit=1 python "$CODE_ROOT/proteinfoundation/train.py" \
         training.ot_coupling.enabled=$OT_COUPLING_ENABLED \
         training.ot_coupling.ot_pool_size=$OT_POOL_SIZE \
         training.meanflow.norm_p=$MEANFLOW_NORM_P \
+        training.meanflow.ratio=$RATIO \
         training.loss_accumulation_steps=$LOSS_ACCUMULATION_STEPS \
         training.self_cond=$SELF_COND \
         training.self_cond_prob=$SELF_COND_PROB \
