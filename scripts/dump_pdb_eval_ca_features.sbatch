@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
-#SBATCH --time=0:30:00
+#SBATCH --time=4:00:00
 #SBATCH --output=logs/dump_fid_ref_%j.out
 #SBATCH --error=logs/dump_fid_ref_%j.err
 
@@ -34,9 +34,17 @@ DATA_STAGE_DIR=$DATA_ROOT/$DATA_NAME
 DATA_STAGE_MD5=$DATA_ROOT/${DATA_NAME}.md5
 PT_DIR="$DATA_STAGE_DIR/processed"
 
-# Output: drop the new reference next to the existing pdb_eval_ca_features.pth
-# so fid.real_features_path can point at it with a short relative path.
-OUTPUT_PATH="$REPO_ROOT/data/metric_factory/features/pdb_eval_ca_features_monomers_frac0.1.pth"
+# Number of independent uniform SO(3) rotations to accumulate per real protein.
+# Training applies global_rotation augmentation on every step, so a single-frame
+# reference (N_ROTATIONS=1) gives an under-spread Gaussian and inflates FID.
+# Override via `sbatch --export=ALL,N_ROTATIONS=64 ...` if needed.
+N_ROTATIONS="${N_ROTATIONS:-1}"
+SEED="${SEED:-0}"
+
+# Output: name the file by the rotation count so we keep the legacy file
+# (pdb_eval_ca_features_monomers_frac0.1.pth, N=1) alongside the augmented one.
+OUTPUT_NAME="pdb_eval_ca_features_monomers_frac0.1_rot${N_ROTATIONS}.pth"
+OUTPUT_PATH="$REPO_ROOT/data/metric_factory/features/$OUTPUT_NAME"
 
 compute_manifest() {
     find "$1" -type f ! -name '*.md5' -printf '%P\t%s\t%T@\n' | LC_ALL=C sort | md5sum | awk '{print $1}'
@@ -124,14 +132,21 @@ echo "============================================================"
 echo "Dumping FID reference features"
 echo "  data: $PT_DIR"
 echo "  output: $OUTPUT_PATH"
+echo "  n_rotations: $N_ROTATIONS"
+echo "  seed: $SEED"
 echo "  log: $DUMP_LOG"
 echo "============================================================"
 
+# Bump time budget proportionally for high N_ROTATIONS — accumulating N
+# rotations per protein is N x slower. The 30-min default in #SBATCH covers
+# N up to ~16 on h100. Override --time= when running with larger N.
 python "$REPO_ROOT/scripts/dump_pdb_eval_ca_features.py" \
     --data-dir "$PT_DIR" \
     --output "$OUTPUT_PATH" \
     --batch-size 16 \
     --max-len 256 \
+    --n-rotations "$N_ROTATIONS" \
+    --seed "$SEED" \
     2>&1 | tee "$DUMP_LOG"
 
 DUMP_EXIT=${PIPESTATUS[0]}

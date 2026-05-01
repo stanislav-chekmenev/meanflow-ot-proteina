@@ -92,6 +92,13 @@ def run_proteinmpnn(
     if python_exec is None:
         python_exec = "python"
 
+    # Optional override: when running on a compute node where weights have
+    # been staged to local /netscratch, point ProteinMPNN at the staged dir
+    # instead of the shared-FS default (`./ProteinMPNN/{ca,vanilla}_model_weights/`).
+    # The dir must contain `v_48_020.pt` (and the {ca_,vanilla_,soluble_} prefix
+    # is encoded in the path so a single env var works for both modes).
+    pmpnn_weights_dir = os.environ.get("PMPNN_WEIGHTS_DIR")
+
     command = f"""
     {python_exec} ./ProteinMPNN/protein_mpnn_run.py \
         --pdb_path {pdb_file_path} \
@@ -105,6 +112,8 @@ def run_proteinmpnn(
 
     if ca_only:
         command += " --ca_only "
+    if pmpnn_weights_dir:
+        command += f" --path_to_model_weights {pmpnn_weights_dir} "
     if seed is not None:
         command += f" --seed {seed} "
     if not verbose:

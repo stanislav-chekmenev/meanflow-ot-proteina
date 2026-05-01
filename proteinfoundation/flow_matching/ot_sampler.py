@@ -142,7 +142,7 @@ class OTPlanSampler:
     def sample_plan_with_scipy(self, x0, x1):
         r"""Compute deterministic OT assignment using scipy's Hungarian algorithm.
 
-        Returns column indices j such that x0[j] is optimally paired with x1.
+        Returns column indices j such that x1[j] is optimally paired with x0.
         Only permutes x0; x1 order is preserved by construction.
         Lower variance than sample_plan.
 
