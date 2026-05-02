@@ -3,10 +3,10 @@ metrics: designability, diversity (TM-score and cluster), and FID.
 
 Pipeline
 --------
-1. Load a Proteina checkpoint and configure single-step inference defaults
-   (sampling_caflow.sampling_mode='sc', sc_scale_noise=0.4, dt=0.0025) — same
-   shape as `configs/experiment_config/inference_base.yaml` +
-   `inference_ucond_200m_notri.yaml`.
+1. Load a Proteina checkpoint. Generation goes through the MeanFlow
+   `predict_step`, which only consumes `nsteps` from the inference cfg —
+   step size is `1/nsteps` on a fixed `[1,0]` linspace, and the classic
+   FM `dt`/`sc_scale_noise` knobs do not enter `meanflow_sample`.
 2. Sample N proteins per length (default lengths=[50,100,150,200,250],
    N=100) using `lightning.Trainer.predict`. Each prediction is a
    `[b, n, 37, 3]` atom37 tensor; we write each entry to a `.pdb` via
@@ -337,6 +337,93 @@ def designability_rate(
     }
 
 
+def aggregate_refold_rmsds(
+    rmsds_by_length: Dict[int, Sequence[Sequence[float]]],
+) -> Dict[str, object]:
+    """Aggregate per-sample lists of refold-RMSDs into per-length and total means.
+
+    Each entry in ``rmsds_by_length[L]`` is the list of RMSDs (one per ESMFold
+    refold of that sample's ProteinMPNN-redesigned sequence; conventionally 8
+    values) between the generated structure and each refolded structure. Two
+    aggregations are reported:
+
+      * ``mean_all``: arithmetic mean over **every** (sample, refold) RMSD —
+        i.e. the average of all 8 × n_samples values per length, then the
+        equally-weighted mean of those across lengths for the total.
+      * ``mean_min``: arithmetic mean over the **per-sample minimum** RMSD
+        (i.e. scRMSD itself, ``min(rmsds_i)``). Same per-length / cross-length
+        averaging.
+
+    Non-finite values (``inf``/``nan``) are filtered out before reduction;
+    if a sample has no finite refold RMSD, it contributes nothing to either
+    aggregate. Lengths with no finite-RMSD samples produce ``None`` for that
+    length and are excluded from the cross-length total.
+
+    Args:
+        rmsds_by_length: ``{L: [[r0, r1, ...], [r0, r1, ...], ...]}``. Outer
+            key is the length, inner list is per sample, innermost is
+            per-refold RMSD in Å.
+
+    Returns:
+        ``{"per_length_mean_all": {L: float | None},
+           "per_length_mean_min": {L: float | None},
+           "per_length_n_samples": {L: int},
+           "per_length_n_pairs": {L: int},
+           "mean_all": float | None,
+           "mean_min": float | None,
+           "total_n_samples": int,
+           "total_n_pairs": int}``.
+    """
+    import math
+
+    per_length_mean_all: Dict[int, Optional[float]] = {}
+    per_length_mean_min: Dict[int, Optional[float]] = {}
+    per_length_n_samples: Dict[int, int] = {}
+    per_length_n_pairs: Dict[int, int] = {}
+
+    for L, samples in rmsds_by_length.items():
+        all_finite: List[float] = []
+        per_sample_mins: List[float] = []
+        n_samples = 0
+        for rmsds in samples:
+            finite = [float(r) for r in rmsds if math.isfinite(float(r))]
+            if not finite:
+                continue
+            all_finite.extend(finite)
+            per_sample_mins.append(min(finite))
+            n_samples += 1
+        per_length_n_samples[int(L)] = n_samples
+        per_length_n_pairs[int(L)] = len(all_finite)
+        per_length_mean_all[int(L)] = (
+            sum(all_finite) / len(all_finite) if all_finite else None
+        )
+        per_length_mean_min[int(L)] = (
+            sum(per_sample_mins) / len(per_sample_mins)
+            if per_sample_mins
+            else None
+        )
+
+    finite_means_all = [v for v in per_length_mean_all.values() if v is not None]
+    finite_means_min = [v for v in per_length_mean_min.values() if v is not None]
+    mean_all = (
+        sum(finite_means_all) / len(finite_means_all) if finite_means_all else None
+    )
+    mean_min = (
+        sum(finite_means_min) / len(finite_means_min) if finite_means_min else None
+    )
+
+    return {
+        "per_length_mean_all": per_length_mean_all,
+        "per_length_mean_min": per_length_mean_min,
+        "per_length_n_samples": per_length_n_samples,
+        "per_length_n_pairs": per_length_n_pairs,
+        "mean_all": mean_all,
+        "mean_min": mean_min,
+        "total_n_samples": sum(per_length_n_samples.values()),
+        "total_n_pairs": sum(per_length_n_pairs.values()),
+    }
+
+
 def parse_tmalign_output(text: str, *, normalize_by: str = "chain1") -> float:
     """Parse a TM-align stdout block and return the requested TM-score.
 
@@ -454,36 +541,22 @@ def tm_align_pair(pdb_a: str, pdb_b: str, *, tmalign_bin: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _build_inference_cfg(dt: float, nsteps: int, sc_scale_noise: float = 0.4):
+def _build_inference_cfg(nsteps: int):
     """Build a minimal OmegaConf-style cfg with the keys
     `proteina.predict_step` / `configure_inference` look up.
 
-    `nsteps` overrides `Proteina.meanflow_nsteps_sample` (which is loaded
-    from the checkpoint's training config and defaults to 1). Setting it
-    to >1 switches to MeanFlow multi-step generation.
+    On the MeanFlow predict_step path only `nsteps` (and `fold_cond`) are
+    read; the classic FM keys (`dt`, `sampling_caflow`, `schedule`,
+    guidance) live for the `simulate()` path and are not consulted by
+    `meanflow_sample`. `nsteps` overrides `Proteina.meanflow_nsteps_sample`
+    (loaded from the ckpt's training cfg, default 1); >1 switches to
+    multi-step Euler integration of the average velocity field.
     """
     from omegaconf import OmegaConf
 
     cfg_dict = {
         "nsteps": nsteps,
-        "self_cond": True,
         "fold_cond": False,
-        "dt": dt,
-        "sampling_caflow": {
-            "sampling_mode": "sc",
-            "sc_scale_noise": sc_scale_noise,
-            "sc_scale_score": 1.0,
-            "gt_mode": "1/t",
-            "gt_p": 1.0,
-            "gt_clamp_val": None,
-        },
-        "schedule": {
-            "schedule_mode": "log",
-            "schedule_p": 2.0,
-        },
-        "guidance_weight": 1.0,
-        "autoguidance_ratio": 0.0,
-        "autoguidance_ckpt_path": None,
     }
     return OmegaConf.create(cfg_dict)
 
@@ -494,9 +567,7 @@ def _generate_samples(
     lengths: Sequence[int],
     n_per_length: int,
     output_pdb_dir: str,
-    dt: float,
     nsteps: int,
-    sc_scale_noise: float,
     seed: int,
     max_nsamples_per_batch: int = 8,
 ) -> Dict[int, List[str]]:
@@ -526,13 +597,9 @@ def _generate_samples(
     logger.info(f"Loading Proteina checkpoint: {ckpt_path}")
     model = Proteina.load_from_checkpoint(ckpt_path)
 
-    inf_cfg = _build_inference_cfg(
-        dt=dt, nsteps=nsteps, sc_scale_noise=sc_scale_noise
-    )
+    inf_cfg = _build_inference_cfg(nsteps=nsteps)
     model.configure_inference(inf_cfg, nn_ag=None)
-    logger.info(
-        f"MeanFlow generation: nsteps={nsteps} dt={dt} sc_scale_noise={sc_scale_noise}"
-    )
+    logger.info(f"MeanFlow generation: nsteps={nsteps}")
 
     nres_list: List[int] = []
     nsamples_list: List[int] = []
@@ -544,7 +611,9 @@ def _generate_samples(
             nsamples_list.append(chunk)
             remaining -= chunk
 
-    dataset = GenDataset(nres=nres_list, nsamples=nsamples_list, dt=dt)
+    # GenDataset's `dt` ends up in the batch dict but the MeanFlow predict_step
+    # never reads it — leave it at the GenDataset default.
+    dataset = GenDataset(nres=nres_list, nsamples=nsamples_list)
     dataloader = DataLoader(dataset, batch_size=1)
 
     trainer = L_pl.Trainer(accelerator="gpu", devices=1, logger=False)
@@ -766,7 +835,6 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--skip-fid", action="store_true")
     p.add_argument("--skip-tm-diversity", action="store_true")
     p.add_argument("--skip-cluster-diversity", action="store_true")
-    p.add_argument("--dt", type=float, default=0.0025)
     p.add_argument(
         "--nsteps",
         type=int,
@@ -778,7 +846,6 @@ def _build_argparser() -> argparse.ArgumentParser:
             "inference."
         ),
     )
-    p.add_argument("--sc-scale-noise", type=float, default=0.4)
     p.add_argument("--seed", type=int, default=5)
     p.add_argument("--designability-threshold", type=float, default=2.0)
     p.add_argument(
@@ -818,8 +885,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logger.info(f"  lengths:             {lengths}")
     logger.info(f"  samples/length:      {n_per_length}")
     logger.info(f"  nsteps (meanflow):   {args.nsteps}")
-    logger.info(f"  dt:                  {args.dt}")
-    logger.info(f"  sc_scale_noise:      {args.sc_scale_noise}")
     logger.info(f"  seed:                {args.seed}")
     logger.info(f"  output_dir:          {output_dir}")
     logger.info(f"  gearnet_ckpt:        {args.gearnet_ckpt}")
@@ -838,9 +903,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lengths=lengths,
         n_per_length=n_per_length,
         output_pdb_dir=pdb_dir,
-        dt=args.dt,
         nsteps=args.nsteps,
-        sc_scale_noise=args.sc_scale_noise,
         seed=args.seed,
         max_nsamples_per_batch=args.max_nsamples_per_batch,
     )
@@ -852,8 +915,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "lengths": lengths,
             "num_samples_per_length": n_per_length,
             "nsteps": args.nsteps,
-            "dt": args.dt,
-            "sc_scale_noise": args.sc_scale_noise,
             "seed": args.seed,
             "designability_threshold": args.designability_threshold,
             "quick_test": args.quick_test,
@@ -897,6 +958,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"Designability: {d_summary['n_designable']}/{d_summary['n_total']} "
             f"= {d_summary['designability']}"
         )
+
+        # Per-length and total mean RMSD between generated and refolded
+        # structures, derived from the same scRMSD lists scRMSD computed
+        # for designability (no extra ESMFold/MPNN cost).
+        flat_paths = d_summary["pdb_paths"]
+        per_sample_rmsds = d_summary["per_sample_rmsds"]
+        rmsds_by_length: Dict[int, List[List[float]]] = {L: [] for L in lengths}
+        for L, indices in d_summary["by_length_flat_indices"].items():
+            for i in indices:
+                rmsds_by_length[L].append(list(per_sample_rmsds[i]))
+        refold_summary = aggregate_refold_rmsds(rmsds_by_length)
+        results["refold_rmsd"] = refold_summary
+        logger.info(
+            f"Refold RMSD: mean_all={refold_summary['mean_all']} "
+            f"mean_min={refold_summary['mean_min']} "
+            f"(over {refold_summary['total_n_samples']} samples / "
+            f"{refold_summary['total_n_pairs']} pairs)"
+        )
+        for L in lengths:
+            ma = refold_summary["per_length_mean_all"].get(int(L))
+            mm = refold_summary["per_length_mean_min"].get(int(L))
+            ns = refold_summary["per_length_n_samples"].get(int(L), 0)
+            np_ = refold_summary["per_length_n_pairs"].get(int(L), 0)
+            logger.info(
+                f"  L={L}: mean_all={ma} mean_min={mm} "
+                f"(n_samples={ns}, n_pairs={np_})"
+            )
 
     designable_flat = [
         p for paths in designable_by_length.values() for p in paths
@@ -978,6 +1066,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         d = results["designability"]
         logger.info(
             f"  Designability:    {d['n_designable']}/{d['n_total']} = {d['designability']}"
+        )
+    if "refold_rmsd" in results:
+        rr = results["refold_rmsd"]
+        logger.info(
+            f"  Refold RMSD:      mean_all={rr['mean_all']} mean_min={rr['mean_min']}"
         )
     if "tm_diversity" in results:
         logger.info(

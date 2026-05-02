@@ -24,6 +24,7 @@ import torch
 
 from scripts.eval_metrics import (
     aggregate_pairwise_diversity,
+    aggregate_refold_rmsds,
     cluster_diversity_from_dir,
     compute_novelty,
     designability_rate,
@@ -312,3 +313,55 @@ def test_compute_novelty_returns_none_and_warns(caplog):
     # the test fails loudly here.
     assert "Novelty" in text or "novelty" in text
     assert "not yet implemented" in text or "placeholder" in text
+
+
+# -------------------------- aggregate_refold_rmsds ---------------------
+
+
+def test_aggregate_refold_rmsds_basic_means():
+    rmsds = {
+        50: [[1.0, 2.0, 3.0], [0.5, 1.5, 2.5]],
+        100: [[4.0, 4.0]],
+    }
+    out = aggregate_refold_rmsds(rmsds)
+    # mean_all = avg of all 8 values at L=50; mean_min = avg of [1.0, 0.5]
+    assert math.isclose(out["per_length_mean_all"][50], 1.75)
+    assert math.isclose(out["per_length_mean_min"][50], 0.75)
+    assert math.isclose(out["per_length_mean_all"][100], 4.0)
+    assert math.isclose(out["per_length_mean_min"][100], 4.0)
+    # Cross-length total: equal weighting across lengths.
+    assert math.isclose(out["mean_all"], (1.75 + 4.0) / 2)
+    assert math.isclose(out["mean_min"], (0.75 + 4.0) / 2)
+    assert out["per_length_n_samples"] == {50: 2, 100: 1}
+    assert out["per_length_n_pairs"] == {50: 6, 100: 2}
+    assert out["total_n_samples"] == 3
+    assert out["total_n_pairs"] == 8
+
+
+def test_aggregate_refold_rmsds_filters_non_finite():
+    inf = float("inf")
+    nan = float("nan")
+    rmsds = {50: [[inf, nan], [1.0, 2.0]]}
+    out = aggregate_refold_rmsds(rmsds)
+    # The all-non-finite sample is dropped from both aggregations.
+    assert out["per_length_n_samples"][50] == 1
+    assert out["per_length_n_pairs"][50] == 2
+    assert math.isclose(out["per_length_mean_all"][50], 1.5)
+    assert math.isclose(out["per_length_mean_min"][50], 1.0)
+
+
+def test_aggregate_refold_rmsds_empty_length_excluded_from_total():
+    out = aggregate_refold_rmsds({50: [[1.0]], 100: []})
+    assert out["per_length_mean_all"][100] is None
+    assert out["per_length_mean_min"][100] is None
+    # The empty length must NOT pollute the cross-length average.
+    assert math.isclose(out["mean_all"], 1.0)
+    assert math.isclose(out["mean_min"], 1.0)
+
+
+def test_aggregate_refold_rmsds_all_empty_returns_none():
+    out = aggregate_refold_rmsds({50: [], 100: []})
+    assert out["mean_all"] is None
+    assert out["mean_min"] is None
+    assert out["total_n_samples"] == 0
+    assert out["total_n_pairs"] == 0
