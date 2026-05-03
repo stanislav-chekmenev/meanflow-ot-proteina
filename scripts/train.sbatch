@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mf_ot
+#SBATCH --job-name=mf_base_no_rot
 #SBATCH --partition=h100
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:h100nvl:2
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=4-00:00:00
-#SBATCH --output=logs/train_ot_%j.out
-#SBATCH --error=logs/train_ot_%j.err
+#SBATCH --output=logs/train_base_no_rot_%j.out
+#SBATCH --error=logs/train_base_no_rot_%j.err
 
 echo "==========================================="
 echo "Job started: $(date)"
@@ -228,13 +228,13 @@ export NCCL_COMM_ID_TIMEOUT=60
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca.yaml)
-EXP_NAME="mf-ot-frac${DATAMODULE_FRACTION}"
+EXP_NAME="mf-base-frac${DATAMODULE_FRACTION}-norot"
 ACCUMULATE_GRAD_BATCHES=4
 # VAL_CHECK_INTERVAL is in OPTIMIZER STEPS. Lightning's val_check_interval is
 # measured in dataloader batches, so we multiply by ACCUMULATE_GRAD_BATCHES
 # when passing it as the opt.val_check_interval override below.
 VAL_CHECK_INTERVAL=5000
-OT_COUPLING_ENABLED=True
+OT_COUPLING_ENABLED=False
 MEANFLOW_NORM_P=1
 RATIO=0.75 # meanflow loss ratio with respect to FM loss
 OT_POOL_SIZE=256
@@ -245,6 +245,10 @@ LR_DECAY_TOTAL_STEPS=100000
 INIT_LR=1e-6
 END_LR=1e-5
 LR=1e-4
+
+#Data augmentation
+GLOBAL_ROTATION=false
+
 
 # Checkpointing
 # True: resume from store/<run>/checkpoints/last.ckpt if it exists.
@@ -322,6 +326,7 @@ srun --kill-on-bad-exit=1 python "$CODE_ROOT/proteinfoundation/train.py" \
         training.self_cond_prob=$SELF_COND_PROB \
         hardware.ncpus_per_task_train_=$NCPUS_PER_TASK_TRAIN \
         hardware.ncpus_per_task_prepro_=$NCPUS_PER_TASK_PREPRO \
+        model.augmentation.global_rotation=$GLOBAL_ROTATION \
         "${H100_OVERRIDES[@]}" \
     --data_overrides \
         datamodule.batch_size=$DATAMODULE_BATCH_SIZE \

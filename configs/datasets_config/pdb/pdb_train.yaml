@@ -8,7 +8,7 @@ datamodule:
   batch_padding: True # whether we want a sparse PyG batch or a padded dense batch
   sampling_mode: "cluster-random" # sample randomly inside each sequence similarity cluster during training
   transforms: 
-    - _target_: "proteinfoundation.datasets.transforms.GlobalRotationTransform" # Transforms to apply to dataset examples
+    # _target_: "proteinfoundation.datasets.transforms.GlobalRotationTransform" # Transforms to apply to dataset examples
     - _target_: "proteinfoundation.datasets.transforms.ChainBreakPerResidueTransform"
     # - _target_: "proteinfoundation.datasets.transforms.CATHLabelTransform" # activate for fold-conditional training
     #   root_dir: ${oc.env:DATA_PATH}/cathdata/ # Root directory for CATH labels

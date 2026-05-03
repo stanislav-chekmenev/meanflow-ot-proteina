@@ -154,6 +154,7 @@ def _build_ckpt_callbacks(checkpoint_path_store, cfg_log):
         "filename": "ignore",
         "every_n_train_steps": cfg_log.last_ckpt_every_n_steps,
         "save_last": True,
+        "save_top_k": 0,
     }
     callbacks = [EmaModelCheckpoint(**args_ckpt_last)]
 

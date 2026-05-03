@@ -2,6 +2,7 @@
 *.tar
 __pycache__/
 
+analysis/
 lightning_logs
 
 # Data

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=eval_metrics
-#SBATCH --partition=gpu
-#SBATCH --qos=normal
+#SBATCH --partition=spot
+#SBATCH --qos=spot
 #SBATCH --gres=gpu:rtx6000:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodes=1
@@ -29,7 +29,7 @@ DATA_ROOT="/netscratch/schekmenev"
 # is invisible to the spot/gpu partitions where eval typically runs. Stage the
 # desired ckpt to shared FS first (manual cp from the h100 node), then point
 # this path at the staged copy.
-CKPT_PATH="/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/ckpts/mf-ot-frac0.1/checkpoints/last-EMA.ckpt"
+CKPT_PATH="/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/ckpts/mf-base-frac0.5/checkpoints/last-EMA.ckpt"
 
 # Output directory (created if missing). Default: under node-local /netscratch
 # so generated PDBs + ProteinMPNN/ESMFold scratch don't hit the slow shared FS.
