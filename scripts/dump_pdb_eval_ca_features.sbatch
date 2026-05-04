@@ -24,10 +24,13 @@ echo "==========================================="
 REPO_ROOT="/mnt/labs/home/schekmenev/projects/meanflow-ot-proteina"
 DATA_ROOT="/netscratch/schekmenev"
 
-# Source dataset (preprocessed monomers, fraction=0.1) and node-local stage.
+# Source dataset (preprocessed monomers) and node-local stage.
 # Same md5-manifest contract as train.sbatch / fid_diagnostic.sbatch: stage
 # only re-syncs when the source manifest disagrees.
-DATA_NAME=monomers_minl50_maxl256_ds_frac_0.1
+# FRACTION selects which preprocessed split to read. Override via
+# `sbatch --export=ALL,FRACTION=0.5 ...`.
+FRACTION="${FRACTION:-0.1}"
+DATA_NAME=monomers_minl50_maxl256_ds_frac_${FRACTION}
 DATA_SRC=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/${DATA_NAME}/
 DATA_SRC_MD5=/mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/${DATA_NAME}.md5
 DATA_STAGE_DIR=$DATA_ROOT/$DATA_NAME
@@ -41,9 +44,26 @@ PT_DIR="$DATA_STAGE_DIR/processed"
 N_ROTATIONS="${N_ROTATIONS:-1}"
 SEED="${SEED:-0}"
 
+# Train-only mode: when set (default), restrict the FID reference to the
+# training pipeline's deterministic train split (no val/test leakage). The
+# splitter is reproduced inside the dump script using the cluster .tsv that
+# ships with the staged dataset. Pass TRAIN_ONLY=0 to fall back to the
+# directory-listing behaviour (legacy).
+TRAIN_ONLY="${TRAIN_ONLY:-1}"
+
+# Cap the FID reference at this many proteins (deterministic subsample). FID
+# is asymptotically stable past a few thousand samples, so 5000 keeps the
+# .pth small and the dump fast without changing the metric materially.
+MAX_SAMPLES="${MAX_SAMPLES:-5000}"
+SUBSAMPLE_SEED="${SUBSAMPLE_SEED:-0}"
+
 # Output: name the file by the rotation count so we keep the legacy file
-# (pdb_eval_ca_features_monomers_frac0.1.pth, N=1) alongside the augmented one.
-OUTPUT_NAME="pdb_eval_ca_features_monomers_frac0.1_rot${N_ROTATIONS}.pth"
+# (pdb_eval_ca_features_monomers_frac<F>.pth, N=1) alongside the augmented one.
+if [ "$N_ROTATIONS" = "1" ]; then
+    OUTPUT_NAME="pdb_eval_ca_features_monomers_frac${FRACTION}.pth"
+else
+    OUTPUT_NAME="pdb_eval_ca_features_monomers_frac${FRACTION}_rot${N_ROTATIONS}.pth"
+fi
 OUTPUT_PATH="$REPO_ROOT/data/metric_factory/features/$OUTPUT_NAME"
 
 compute_manifest() {
@@ -130,12 +150,28 @@ DUMP_LOG="$REPO_ROOT/logs/dump_fid_ref_${SLURM_JOB_ID}.log"
 echo ""
 echo "============================================================"
 echo "Dumping FID reference features"
+echo "  fraction: $FRACTION"
 echo "  data: $PT_DIR"
+echo "  dataset_root: $DATA_STAGE_DIR"
 echo "  output: $OUTPUT_PATH"
 echo "  n_rotations: $N_ROTATIONS"
 echo "  seed: $SEED"
+echo "  train_only: $TRAIN_ONLY"
+echo "  max_samples: $MAX_SAMPLES"
+echo "  subsample_seed: $SUBSAMPLE_SEED"
 echo "  log: $DUMP_LOG"
 echo "============================================================"
+
+# Build optional flags conditionally so legacy mode still works.
+EXTRA_ARGS=()
+if [ "$TRAIN_ONLY" = "1" ]; then
+    EXTRA_ARGS+=("--dataset-root" "$DATA_STAGE_DIR")
+    EXTRA_ARGS+=("--fraction" "$FRACTION")
+fi
+if [ -n "$MAX_SAMPLES" ] && [ "$MAX_SAMPLES" != "0" ]; then
+    EXTRA_ARGS+=("--max-samples" "$MAX_SAMPLES")
+    EXTRA_ARGS+=("--subsample-seed" "$SUBSAMPLE_SEED")
+fi
 
 # Bump time budget proportionally for high N_ROTATIONS — accumulating N
 # rotations per protein is N x slower. The 30-min default in #SBATCH covers
@@ -147,6 +183,7 @@ python "$REPO_ROOT/scripts/dump_pdb_eval_ca_features.py" \
     --max-len 256 \
     --n-rotations "$N_ROTATIONS" \
     --seed "$SEED" \
+    "${EXTRA_ARGS[@]}" \
     2>&1 | tee "$DUMP_LOG"
 
 DUMP_EXIT=${PIPESTATUS[0]}

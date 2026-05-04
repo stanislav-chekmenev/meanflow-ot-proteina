@@ -8,6 +8,18 @@ directory). Useful when the FID reference shipped in the repo doesn't reflect
 the train distribution and we want to point `fid.real_features_path` at a
 matched reference instead.
 
+Train-only filtering
+--------------------
+The training pipeline splits the selected dataset into train/val/test by
+sequence-similarity clusters with a deterministic seed. To keep FID exactly
+on the train distribution (no val/test leakage), pass ``--fraction F`` (the
+same fraction used in training) along with the dataset root via
+``--dataset-root``. The script reconstructs the same `PDBLightningDataModule`
+that training uses, calls `setup("fit")`, reads `dm.dfs_splits["train"]`, and
+restricts the .pt files iterated to that exact set. ``--max-samples N``
+deterministically subsamples the train list to N proteins (with
+``--subsample-seed`` controlling the draw).
+
 Rotation augmentation
 ---------------------
 Training applies a uniform SO(3) rotation to every x_1 on every step
@@ -27,11 +39,13 @@ Usage
 -----
     source .venv/bin/activate
     PYTHONPATH=. python scripts/dump_pdb_eval_ca_features.py \
-        --data-dir /mnt/labs/data/bronstein/schekmenev/ot_mf_proteina/monomers_minl50_maxl256_ds_frac_0.1/processed \
-        --output data/metric_factory/features/pdb_eval_ca_features_monomers_frac0.1_rot32.pth \
+        --dataset-root /netscratch/schekmenev/monomers_minl50_maxl256_ds_frac_0.5 \
+        --fraction 0.5 \
+        --max-samples 5000 \
+        --output data/metric_factory/features/pdb_eval_ca_features_monomers_frac0.5.pth \
         --batch-size 16 \
         --max-len 256 \
-        --n-rotations 32 \
+        --n-rotations 1 \
         --seed 0
 """
 
@@ -123,17 +137,24 @@ def iter_real_pyg_batches(
     data_dir: str,
     batch_size: int,
     max_len: int | None = None,
+    allowlist: set[str] | None = None,
 ) -> Iterator[Tuple[Batch, dict]]:
-    """Yield `(pyg_batch, stats)` tuples by loading every `*.pt` in `data_dir`
+    """Yield `(pyg_batch, stats)` tuples by loading `*.pt` files in `data_dir`
     in sorted (deterministic) order.
+
+    If `allowlist` is provided, only files whose basename-without-extension is
+    in the set are processed; everything else is silently skipped.
 
     Skips files that fail to load (counted in `stats["skipped_err"]`) and
     files longer than `max_len` (counted in `stats["skipped_len"]`). Flushes
     the partial last batch.
 
-    Asserts at least 2 valid `.pt` files exist in `data_dir` (FID needs >=2).
+    Asserts at least 2 valid `.pt` files exist after the allowlist filter
+    (FID needs >=2).
     """
     pt_files = sorted(glob.glob(os.path.join(data_dir, "*.pt")))
+    if allowlist is not None:
+        pt_files = [p for p in pt_files if os.path.splitext(os.path.basename(p))[0] in allowlist]
     assert len(pt_files) >= 2, (
         f"Need at least 2 .pt files in {data_dir} to build a FID reference, "
         f"found {len(pt_files)}."
@@ -160,12 +181,124 @@ def iter_real_pyg_batches(
         yield Batch.from_data_list(buf), dict(stats)
 
 
+def _materialize_train_filenames(
+    dataset_root: str,
+    fraction: float,
+    min_length: int = 50,
+    max_length: int = 256,
+) -> set[str]:
+    """Reconstruct the same train-split filename set the training pipeline uses.
+
+    Mirrors the (deterministic, seed=42) sequence-similarity split performed by
+    `PDBLightningDataModule.setup`: builds the same `PDBDataSelector` /
+    `PDBDataSplitter` config as `configs/datasets_config/pdb/pdb_train.yaml`,
+    runs `setup("fit")`, and reads `dm.dfs_splits["train"]` to produce the set
+    of `<pdb>_<chain>` (or `<pdb>`) basenames that map onto `<basename>.pt` in
+    `<dataset_root>/processed/`.
+
+    The split file (cluster .tsv) is expected to already be present in
+    `dataset_root` — it ships staged with the dataset. This function does not
+    invoke mmseqs.
+    """
+    from proteinfoundation.datasets.pdb_data import (
+        PDBDataSelector,
+        PDBDataSplitter,
+        PDBLightningDataModule,
+    )
+
+    dataselector = PDBDataSelector(
+        data_dir=dataset_root,
+        fraction=fraction,
+        molecule_type="protein",
+        experiment_types=["diffraction", "EM"],
+        min_length=min_length,
+        max_length=max_length,
+        oligomeric_min=1,
+        oligomeric_max=1,
+        best_resolution=0.0,
+        worst_resolution=5.0,
+        has_ligands=[],
+        remove_ligands=[],
+        remove_non_standard_residues=True,
+        remove_pdb_unavailable=True,
+        exclude_ids=[],
+    )
+    datasplitter = PDBDataSplitter(
+        data_dir=dataset_root,
+        train_val_test=[0.98, 0.019, 0.001],
+        split_type="sequence_similarity",
+        split_sequence_similarity=0.5,
+        overwrite_sequence_clusters=False,
+    )
+    dm = PDBLightningDataModule(
+        data_dir=dataset_root,
+        dataselector=dataselector,
+        datasplitter=datasplitter,
+        in_memory=False,
+        format="cif",
+        overwrite=False,
+        batch_padding=True,
+        sampling_mode="cluster-random",
+        transforms=None,
+        batch_size=1,
+        num_workers=0,
+        pin_memory=False,
+    )
+    dm.setup(stage="fit")
+    df_train = dm.dfs_splits["train"]
+    pdb = df_train["pdb"].astype(str).tolist()
+    if "chain" in df_train.columns:
+        chain = df_train["chain"].astype(str).tolist()
+        names = [f"{p}_{c}" for p, c in zip(pdb, chain)]
+    else:
+        names = list(pdb)
+    return set(names)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data-dir",
-        default=DEFAULT_DATA_DIR,
-        help="Directory of pre-processed .pt files (one per protein).",
+        default=None,
+        help=(
+            "Directory of pre-processed .pt files (one per protein). "
+            "If omitted, derived as <dataset-root>/processed."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-root",
+        default=None,
+        help=(
+            "Root of the staged dataset (the directory containing both the "
+            "df_pdb_*.csv metadata and the cluster .tsv). Required when "
+            "--fraction is set so the splitter can reproduce the train split."
+        ),
+    )
+    parser.add_argument(
+        "--fraction",
+        type=float,
+        default=None,
+        help=(
+            "If set, restrict iteration to the train split of the deterministic "
+            "sequence-similarity split for this fraction (avoids val/test "
+            "leakage into the FID reference). Mirrors training's "
+            "datamodule.dataselector.fraction."
+        ),
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help=(
+            "Cap the number of real proteins used for FID. Subsamples the train "
+            "list deterministically (see --subsample-seed). No cap if unset."
+        ),
+    )
+    parser.add_argument(
+        "--subsample-seed",
+        type=int,
+        default=0,
+        help="RNG seed for the --max-samples subsample draw.",
     )
     parser.add_argument(
         "--output",
@@ -205,6 +338,56 @@ def main():
         f"--n-rotations must be >= 1, got {args.n_rotations}"
     )
 
+    # Resolve --data-dir (defaults to <dataset-root>/processed if dataset-root given).
+    if args.data_dir is None:
+        if args.dataset_root is None:
+            args.data_dir = DEFAULT_DATA_DIR
+        else:
+            args.data_dir = os.path.join(args.dataset_root, "processed")
+
+    # Train-only mode: build the allowlist of <pdb>(_<chain>) basenames that
+    # belong to the deterministic train split for this fraction.
+    allowlist: set[str] | None = None
+    if args.fraction is not None:
+        assert args.dataset_root is not None, (
+            "--fraction requires --dataset-root pointing at the staged dataset "
+            "(directory containing df_pdb_*.csv and cluster .tsv)."
+        )
+        max_len_for_split = args.max_len if args.max_len is not None else 256
+        print(
+            f"[dump-features] Materializing train split: fraction={args.fraction} "
+            f"dataset_root={args.dataset_root}"
+        )
+        allowlist = _materialize_train_filenames(
+            dataset_root=args.dataset_root,
+            fraction=args.fraction,
+            min_length=50,
+            max_length=max_len_for_split,
+        )
+        print(f"[dump-features] Train split has {len(allowlist)} proteins.")
+
+        if args.max_samples is not None and args.max_samples < len(allowlist):
+            import random
+            rng = random.Random(args.subsample_seed)
+            sampled = rng.sample(sorted(allowlist), args.max_samples)
+            allowlist = set(sampled)
+            print(
+                f"[dump-features] Subsampled to {len(allowlist)} proteins "
+                f"(seed={args.subsample_seed})."
+            )
+    elif args.max_samples is not None:
+        # Allow --max-samples without --fraction: subsample the directory listing.
+        import random
+        all_pt = sorted(glob.glob(os.path.join(args.data_dir, "*.pt")))
+        all_names = [os.path.splitext(os.path.basename(p))[0] for p in all_pt]
+        if args.max_samples < len(all_names):
+            rng = random.Random(args.subsample_seed)
+            allowlist = set(rng.sample(all_names, args.max_samples))
+            print(
+                f"[dump-features] Subsampled directory listing to "
+                f"{len(allowlist)} proteins (seed={args.subsample_seed})."
+            )
+
     if args.seed is not None:
         torch.manual_seed(args.seed)
         try:
@@ -240,7 +423,10 @@ def main():
     final_stats = {"processed": 0, "skipped_len": 0, "skipped_err": 0}
 
     for pyg_batch, stats in iter_real_pyg_batches(
-        args.data_dir, batch_size=args.batch_size, max_len=args.max_len
+        args.data_dir,
+        batch_size=args.batch_size,
+        max_len=args.max_len,
+        allowlist=allowlist,
     ):
         pyg_batch = pyg_batch.to(device)
         # Cache the original coords so each rotation round rotates from the

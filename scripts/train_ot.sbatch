@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mf_base_no_rot_frac0.5
+#SBATCH --job-name=mf_ot_no_rot_frac0.5
 #SBATCH --partition=h100
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:h100nvl:2
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=4-00:00:00
-#SBATCH --output=logs/train_base_no_rot_frac0.5_%j.out
-#SBATCH --error=logs/train_base_no_rot_frac0.5_%j.err
+#SBATCH --output=logs/train_ot_no_rot_frac0.5_%j.out
+#SBATCH --error=logs/train_ot_no_rot_frac0.5_%j.err
 
 echo "==========================================="
 echo "Job started: $(date)"
@@ -228,13 +228,13 @@ export NCCL_COMM_ID_TIMEOUT=60
 
 # --- Configurable Hydra overrides ---
 # Experiment config (training_ca.yaml)
-EXP_NAME="mf-base-frac${DATAMODULE_FRACTION}-norot"
+EXP_NAME="mf-ot-frac${DATAMODULE_FRACTION}-norot"
 ACCUMULATE_GRAD_BATCHES=4
 # VAL_CHECK_INTERVAL is in OPTIMIZER STEPS. Lightning's val_check_interval is
 # measured in dataloader batches, so we multiply by ACCUMULATE_GRAD_BATCHES
 # when passing it as the opt.val_check_interval override below.
 VAL_CHECK_INTERVAL=5000
-OT_COUPLING_ENABLED=False
+OT_COUPLING_ENABLED=True
 MEANFLOW_NORM_P=1
 RATIO=0.75 # meanflow loss ratio with respect to FM loss
 OT_POOL_SIZE=256
